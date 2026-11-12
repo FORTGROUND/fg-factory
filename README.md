@@ -337,9 +337,26 @@ Entradas do workflow, todas opcionais, no `with:` do seu `factory.yml`:
 | `max_attempts` | `2` | Tentativas por issue |
 | `max_changed_files` | `30` | Acima disso a correção não é publicada |
 | `timeout_minutes` | `90` | Tempo máximo do job |
-| `model` | padrão da conta | Modelo do Claude Code |
+| `model` | padrão da conta | Modelo do Claude Code: um apelido (`opus`, `sonnet`, `haiku`, `fable`) ou o nome completo |
+| `effort` | padrão do modelo | Nível de raciocínio: `low`, `medium`, `high`, `xhigh` ou `max` |
+| `fast` | `false` | Modo rápido: as mesmas respostas, mais depressa, com preço maior por token |
 | `tracker_url` | API do FG Tracker | Para instalações próprias |
 | `report_logs` | `false` | Envia a saída da sessão ao painel do FG Tracker (com o segredo do painel) |
+
+### Modelo, raciocínio e modo rápido
+
+As três entradas escolhem como a sessão do Claude Code roda. O modelo de `templates/factory.yml`
+já traz as três no disparo manual (Actions → Factory → Run workflow), para testar uma combinação
+numa issue sem editar o arquivo; nos disparos automáticos vale o que está no `with:`.
+
+- **Raciocínio** mais alto investiga mais e gasta mais tokens e tempo. `low` serve para triagem
+  barata; `high` ou acima, para causas difíceis.
+- **Modo rápido** só existe em alguns modelos (hoje Opus e Fable; a lista está em
+  [code.claude.com/docs/en/fast-mode](https://code.claude.com/docs/en/fast-mode)). Num modelo sem
+  suporte a sessão roda na velocidade normal. Com o token da assinatura ele **não entra na cota do
+  plano**: é cobrado dos créditos de uso da conta, que precisam estar ligados. Com a chave da API,
+  entra na fatura pelo preço do modo rápido.
+- A linha "Sessão: modelo …" no resumo da execução mostra o que foi usado.
 
 ## Com uma IA
 

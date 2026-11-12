@@ -15,13 +15,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && install -d -m 0755 /etc/apt/keyrings \
  && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /etc/apt/keyrings/githubcli.gpg \
  && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli.gpg] https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list \
+ && curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc \
+ && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu noble stable" > /etc/apt/sources.list.d/docker.list \
  && curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | bash - \
  && apt-get install -y --no-install-recommends gh nodejs \
+      docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin iptables \
  && npm install -g "pnpm@${PNPM_VERSION}" @anthropic-ai/claude-code \
  && rm -rf /var/lib/apt/lists/* /root/.npm
 
 # Usuário sem privilégios e sem sudo: o agente roda como ele.
-RUN useradd -m -s /bin/bash factory
+# O grupo `docker` só serve com o Docker do runner ligado (compose.docker.yml); sem ele não há
+# daemon nem socket no contêiner.
+RUN useradd -m -s /bin/bash factory && usermod -aG docker factory
 USER factory
 WORKDIR /home/factory
 

@@ -27,6 +27,34 @@ as_factory() {
   fi
 }
 
+# Docker próprio deste runner (opcional, compose.docker.yml): um daemon dentro do contêiner, com
+# imagens, contêineres, redes e portas só dele. Dois runners na mesma máquina sobem os mesmos
+# serviços nas mesmas portas sem se enxergar, e nada disso aparece no Docker da máquina.
+if [ "${FACTORY_DOCKER:-}" = "true" ]; then
+  if [ "$(id -u)" != "0" ]; then
+    echo "Docker do runner: o contêiner não começou como root; o daemon não sobe." >&2
+  else
+    # cgroup v2: os processos saem da raiz para o daemon poder criar os grupos dos contêineres.
+    if [ -f /sys/fs/cgroup/cgroup.controllers ]; then
+      mkdir -p /sys/fs/cgroup/init
+      xargs -rn1 < /sys/fs/cgroup/cgroup.procs > /sys/fs/cgroup/init/cgroup.procs 2>/dev/null || true
+      sed -e 's/ / +/g' -e 's/^/+/' < /sys/fs/cgroup/cgroup.controllers > /sys/fs/cgroup/cgroup.subtree_control 2>/dev/null || true
+    fi
+    rm -f /var/run/docker.pid /var/run/docker.sock
+    # Sem os tokens deste script no ambiente; volta sozinho se cair.
+    ( while true; do
+        env -u FG_TRACKER_FACTORY_TOKEN -u FACTORY_REGISTRATION_TOKEN dockerd --host=unix:///var/run/docker.sock >> /var/log/dockerd.log 2>&1 || true
+        rm -f /var/run/docker.pid
+        sleep 3
+      done ) &
+    for _ in $(seq 1 60); do
+      if docker info >/dev/null 2>&1; then break; fi
+      sleep 1
+    done
+    docker info >/dev/null 2>&1 || { echo "Docker do runner: o daemon não subiu. Veja /var/log/dockerd.log; o contêiner precisa de privileged (compose.docker.yml)." >&2; tail -20 /var/log/dockerd.log >&2 || true; }
+  fi
+fi
+
 if [ ! -f .runner ]; then
   : "${REGISTRATION_TOKEN:?primeira subida: defina FACTORY_REGISTRATION_TOKEN (README)}"
   # --no-default-labels: só o rótulo factory. Com os padrões (self-hosted, Linux, X64...) este

@@ -1,0 +1,39 @@
+# Docker próprio para cada runner (opcional). Use junto com o compose.yml:
+#
+#   docker compose -f compose.yml -f compose.docker.yml up -d --build runner1
+#
+# Para não repetir os dois arquivos, grave no .env:  COMPOSE_FILE=compose.yml:compose.docker.yml
+#
+# Cada runner ganha um daemon Docker dentro do próprio contêiner. Um job (ou o agente) roda
+# `docker compose up`, e os serviços aparecem em localhost para ele; outro runner na mesma
+# máquina faz o mesmo, nas mesmas portas, sem conflito. Nada vai para o Docker da máquina.
+#
+# O preço: o contêiner do runner passa a ser privilegiado, e quem controla um daemon Docker
+# privilegiado consegue alcançar a máquina. O isolamento "o contêiner não vê a máquina" deixa de
+# ser garantia e vira boa prática. Ligue só onde os testes precisam de Docker (README, "Docker").
+x-docker: &docker
+  privileged: true
+
+services:
+  runner1:
+    <<: *docker
+    environment: { FACTORY_DOCKER: "true" }
+    volumes: [docker1:/var/lib/docker]
+  runner2:
+    <<: *docker
+    environment: { FACTORY_DOCKER: "true" }
+    volumes: [docker2:/var/lib/docker]
+  runner3:
+    <<: *docker
+    environment: { FACTORY_DOCKER: "true" }
+    volumes: [docker3:/var/lib/docker]
+  runner4:
+    <<: *docker
+    environment: { FACTORY_DOCKER: "true" }
+    volumes: [docker4:/var/lib/docker]
+
+volumes:
+  docker1:
+  docker2:
+  docker3:
+  docker4:

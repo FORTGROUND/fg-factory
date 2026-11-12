@@ -94,8 +94,12 @@ minutos entram na cota do Actions da sua conta.
 3. **Triagem e correção.** O Claude Code investiga com o MCP do FG Tracker (trace, logs,
    releases) e decide uma de três saídas: corrigir, ignorar ou deixar para uma pessoa.
 4. **Validação.** O `validate` do repositório precisa passar.
-5. **Publicação.** Branch `factory-issue-<n>-<tentativa>`, commit e PR com `Fixes #<n>`.
-6. **Merge.** Quando o PR entra na branch principal, o GitHub fecha a issue e o FG Tracker a
+5. **Revisão independente.** Outra sessão do Claude Code, sem nada do que a primeira pensou,
+   lê a issue e o diff e julga pelo código. Aprovada, a revisão vai junto no PR. Reprovada, não
+   há PR: a issue fica com `fg-factory:needs-human`, o comentário diz o que foi apontado e o
+   diff fica nos artefatos da execução.
+6. **Publicação.** Branch `factory-issue-<n>-<tentativa>`, commit e PR com `Fixes #<n>`.
+7. **Merge.** Quando o PR entra na branch principal, o GitHub fecha a issue e o FG Tracker a
    marca como resolvida.
 
 ### Labels
@@ -175,6 +179,34 @@ outra coisa (Python, Go, Java), acrescente ao `runner/Dockerfile` e reconstrua.
 | Tirar a máquina da factory | `docker compose down -v` e remova os runners no GitHub |
 
 Notebook que dorme sai da fila enquanto dorme; o job espera outro runner por até 24 h.
+
+#### Docker dentro do runner (opcional)
+
+Sem isto o runner não tem Docker: um `validate` que sobe Postgres, Redis ou outro serviço por
+`docker compose` não roda. Com o arquivo `compose.docker.yml` cada runner ganha um Docker só
+dele, dentro do próprio contêiner:
+
+```sh
+echo 'COMPOSE_FILE=compose.yml:compose.docker.yml' >> .env
+docker compose up -d --build runner1 runner2
+```
+
+- **Portas não colidem.** Cada runner tem a própria rede. Dois runners na mesma máquina sobem o
+  mesmo `docker compose` nas mesmas portas ao mesmo tempo, e cada job enxerga os seus serviços em
+  `localhost`. Nada aparece no Docker da máquina nem ocupa as portas dela.
+- **Mais de um repositório.** Quando a correção passa por dois serviços, o agente pode subir os
+  dois (cada um do seu clone) e testá-los juntos.
+- **Limpeza.** No fim de cada execução, os contêineres, redes e volumes que ela subiu são
+  removidos; as imagens ficam como cache, no volume `docker<N>`.
+- **Montagens.** `-v` funciona com caminhos de dentro do runner (a pasta de trabalho do job).
+  Um contêiner que escreve como root na pasta montada deixa arquivos que o job não consegue
+  apagar: rode-o com `--user "$(id -u):$(id -g)"`.
+
+O preço é o isolamento. Para ter um Docker próprio, o contêiner do runner roda como
+**privilegiado**, e quem controla um Docker privilegiado consegue alcançar a máquina. Sem esta
+opção, "o contêiner não vê a máquina" é uma garantia; com ela, é só o que acontece enquanto
+ninguém tenta sair. Ligue nas máquinas em que os testes precisam de Docker, e mantenha a regra
+de sempre: nada de credencial de produção na máquina.
 
 ### Direto na máquina (macOS e Linux)
 
@@ -341,6 +373,8 @@ Entradas do workflow, todas opcionais, no `with:` do seu `factory.yml`:
 | `effort` | padrão do modelo | Nível de raciocínio: `low`, `medium`, `high`, `xhigh` ou `max` |
 | `fast` | `false` | Modo rápido: as mesmas respostas, mais depressa, com preço maior por token |
 | `tracker_url` | API do FG Tracker | Para instalações próprias |
+| `review` | `true` | Revisão independente antes de publicar; `false` publica sem ela |
+| `review_model`, `review_effort`, `review_fast` | os de cima | Modelo, raciocínio e modo rápido do revisor (`review_fast` é `'true'` ou `'false'`) |
 | `report_logs` | `false` | Envia a saída da sessão ao painel do FG Tracker (com o segredo do painel) |
 
 ### Modelo, raciocínio e modo rápido
@@ -357,6 +391,20 @@ numa issue sem editar o arquivo; nos disparos automáticos vale o que está no `
   plano**: é cobrado dos créditos de uso da conta, que precisam estar ligados. Com a chave da API,
   entra na fatura pelo preço do modo rápido.
 - A linha "Sessão: modelo …" no resumo da execução mostra o que foi usado.
+
+### O revisor independente
+
+Quem corrige tende a aprovar o próprio trabalho. Por isso a factory abre uma segunda sessão
+depois da validação, que não recebe a conclusão nem o raciocínio da primeira: só a issue, o
+diff e o código. Ela não tem token do FG Tracker nem do GitHub e não pode mudar arquivos (o
+workflow confere o diff antes e depois). Só reprova por problema concreto, com arquivo, linha e
+a situação em que dá errado; preferência de estilo vira observação no PR.
+
+- Custa uma sessão a mais, só quando a decisão é corrigir.
+- `review_model`, `review_effort` e `review_fast` escolhem a sessão do revisor separadamente.
+  Vazios, ele usa os mesmos de quem corrige. Um arranjo comum: quem corrige num modelo mais
+  barato e o revisor num mais forte, ou o contrário.
+- Uma correção reprovada conta como tentativa. `review: false` desliga.
 
 ## Com uma IA
 

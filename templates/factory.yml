@@ -27,6 +27,15 @@ on:
         description: Modo rápido (cobra mais por token)
         type: boolean
         default: false
+      review_model:
+        description: Revisor - modelo (vazio = o configurado)
+        type: string
+        default: ''
+      review_effort:
+        description: Revisor - raciocínio
+        type: choice
+        options: [configurado, low, medium, high, xhigh, max]
+        default: configurado
 
 permissions:
   contents: write
@@ -51,6 +60,12 @@ jobs:
       model: ${{ inputs.model || '' }}
       effort: ${{ (inputs.effort != 'configurado' && inputs.effort) || '' }}
       fast: ${{ inputs.fast || false }}
+      # O revisor independente: outra sessão lê a issue e o diff antes de publicar e pode barrar.
+      # `review: false` publica sem revisão. Modelo, raciocínio e modo rápido vazios = os de cima.
+      # review: false
+      review_model: ${{ inputs.review_model || '' }}
+      review_effort: ${{ (inputs.review_effort != 'configurado' && inputs.review_effort) || '' }}
+      # review_fast: 'true'
       # Com o segredo do painel (abaixo), envia também o log da sessão ao FG Tracker.
       # report_logs: true
     secrets:

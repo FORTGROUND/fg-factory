@@ -9,7 +9,7 @@ ARG PNPM_VERSION=10.34.5
 ENV DEBIAN_FRONTEND=noninteractive LANG=C.UTF-8
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates curl git jq tar unzip xz-utils sudo \
+      ca-certificates curl git jq tar unzip xz-utils sudo ffmpeg \
       build-essential pkg-config libssl-dev cmake clang \
       libicu74 libkrb5-3 zlib1g \
  && install -d -m 0755 /etc/apt/keyrings \

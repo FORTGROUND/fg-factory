@@ -218,6 +218,95 @@ publica é criada depois da validação e o agente nunca a vê.
 Sem o app, a factory fica limitada ao repositório da issue. Se a correção depender de outro, a
 issue vai para `fg-factory:needs-human` dizendo qual.
 
+## Painel no FG Tracker
+
+Opcional. Com ele, o FG Tracker mostra em **FG Factory** o que os seus runners estão fazendo:
+quais estão trabalhando, livres ou offline, em que issue e em que passo cada execução está, o
+resultado de cada uma, os PRs e gráficos do período. O item aparece no menu da organização
+depois do primeiro relato, para owners e admins dela.
+
+### 1. Crie o token do painel
+
+No FG Tracker, em Tokens de acesso → novo token, modelo **FG Factory (relatos)**:
+
+- só a permissão **FG Factory: relatar**. Ela não lê nada, nem o próprio painel;
+- **restrito a uma organização**: é ela que recebe os relatos. Sem essa restrição o FG Tracker
+  recusa os relatos;
+- quem cria precisa ser owner ou admin da organização.
+
+É um token diferente do `FACTORY_FG_TRACKER_TOKEN` (o de leitura, que o agente usa). Não use um
+no lugar do outro.
+
+### 2. Execuções: um segredo no repositório
+
+Grave o token como `FACTORY_FG_TRACKER_PANEL_TOKEN` (o `scripts/set-secrets.sh` pergunta por ele)
+e confira que o seu `factory.yml` o repassa, como no [template](templates/factory.yml):
+
+```yaml
+    secrets:
+      FG_TRACKER_FACTORY_TOKEN: ${{ secrets.FACTORY_FG_TRACKER_PANEL_TOKEN }}
+```
+
+A partir daí cada execução relata o começo, o início e o fim de cada passo e o resultado. Sem o
+segredo nada muda: nenhum passo do painel roda.
+
+Para ver também a saída da sessão do Claude Code enquanto ela roda, ligue no `with:`:
+
+```yaml
+      report_logs: true
+```
+
+### 3. Runners: o token no `.env` da máquina
+
+Só para runners em contêiner. Em `runner/.env`:
+
+```sh
+FG_TRACKER_FACTORY_TOKEN=fgt_...
+```
+
+e suba de novo (`docker compose up -d --build runner1`). Cada runner passa a enviar um sinal a
+cada 30 segundos. Sem sinal por 2 minutos, o painel mostra o runner como offline.
+
+### O que é enviado
+
+| De onde | O quê |
+| --- | --- |
+| Workflow | Repositório, número, título e link da issue, tentativa, link da execução, nome do runner, início e fim de cada passo, resultado (`fix`, `ignore`, `needs_human` ou `failed`), passo em que parou, links dos PRs e a frase de conclusão |
+| Workflow, com `report_logs` | As linhas da saída da sessão (`session.log`), em lotes, enquanto ela roda |
+| Runner em contêiner | Nome do runner e da máquina, sistema, arquitetura, versão do runner, se há um job rodando, núcleos, carga, memória e disco |
+
+### O que não é enviado
+
+- Código, diff, o corpo da issue, o `result.json` inteiro, variáveis de ambiente ou segredos.
+- Nada do que o agente lê no FG Tracker.
+- Sem `report_logs`, nenhuma linha da sessão. Com ele, a saída pode citar trechos de código e
+  de logs: o FG Tracker troca os segredos que reconhece por `[Filtered]`, guarda só as últimas
+  5.000 linhas de cada execução e apaga tudo em 7 dias. Deixe desligado se a saída da sessão
+  não pode sair da sua infraestrutura.
+
+### O que o painel mostra de uma execução
+
+Só o que o workflow relatou: quais passos terminaram, qual está rodando e há quanto tempo. Não
+há porcentagem nem previsão de término: o passo de triagem e correção leva o tempo que levar.
+
+### Limites, ditos com clareza
+
+- **Os números de CPU, memória e disco são os que o contêiner enxerga.** A carga e a memória
+  vêm de `/proc` e costumam ser as da máquina inteira (no Docker Desktop, as da VM do Docker); o
+  disco é o do volume do runner.
+- **Runner direto na máquina (`setup-runner.sh`) ainda não envia o sinal.** As execuções dele
+  aparecem no painel; a máquina, não. O mesmo vale para runners hospedados pelo GitHub.
+- **O relato nunca derruba nem atrasa uma execução.** Cada envio tem poucos segundos de limite;
+  se o FG Tracker não responder, o passo deixa um aviso no resumo da execução e segue.
+- **Onde o token fica.** No contêiner, o sinal sai de outro usuário do sistema (`factory-report`),
+  o único que lê o token; o runner e os jobs sobem sem ele no ambiente e sem acesso ao arquivo.
+  No workflow, o token só entra nos passos "Painel", que não rodam código do repositório, e nunca
+  no passo do agente nem no `setup` e no `validate`. A exceção é o `report_logs`: para enviar o
+  log durante a sessão, um processo com o token na memória roda ao mesmo tempo que o agente,
+  como o mesmo usuário. O token não fica no ambiente, em arquivo nem em argumentos desse
+  processo, mas isso não é uma separação de verdade. O que limita o estrago é a permissão: quem
+  tiver esse token só consegue enviar relatos da factory para a sua organização.
+
 ## Segurança
 
 - **O texto da issue é dado, não instrução.** O corpo traz mensagens de erro geradas por
@@ -226,6 +315,8 @@ issue vai para `fg-factory:needs-human` dizendo qual.
   workflow, depois da validação.
 - **Leitura só.** O token do FG Tracker é de leitura; a credencial do GitHub ao alcance do
   agente, quando existe, é de leitura de código.
+- **O token do painel não lê nada.** Ele só envia relatos da factory e fica fora do ambiente do
+  agente ([Painel no FG Tracker](#painel-no-fg-tracker)).
 - **Limites por execução.** Mudanças em `.github/workflows` ou acima de 30 arquivos não são
   publicadas sozinhas. Duas tentativas por issue, depois fica para uma pessoa.
 - **Use em repositórios privados** quando tiver runners próprios: o GitHub não recomenda
@@ -248,6 +339,7 @@ Entradas do workflow, todas opcionais, no `with:` do seu `factory.yml`:
 | `timeout_minutes` | `90` | Tempo máximo do job |
 | `model` | padrão da conta | Modelo do Claude Code |
 | `tracker_url` | API do FG Tracker | Para instalações próprias |
+| `report_logs` | `false` | Envia a saída da sessão ao painel do FG Tracker (com o segredo do painel) |
 
 ## Com uma IA
 

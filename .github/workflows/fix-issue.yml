@@ -52,6 +52,10 @@ on:
         description: Modelo do Claude Code (vazio = o padrão da conta)
         type: string
         default: ''
+      report_logs:
+        description: Envia o log da sessão ao painel da factory no FG Tracker (só com FG_TRACKER_FACTORY_TOKEN)
+        type: boolean
+        default: false
     secrets:
       CLAUDE_CODE_OAUTH_TOKEN:
         description: Token de `claude setup-token` (assinatura do Claude). Este ou ANTHROPIC_API_KEY
@@ -63,6 +67,9 @@ on:
         required: false
       FG_TRACKER_TOKEN:
         description: Token do FG Tracker só de leitura (telemetria, issues, releases)
+        required: false
+      FG_TRACKER_FACTORY_TOKEN:
+        description: 'Token do FG Tracker só com a permissão "FG Factory: relatar" (opcional). Com ele a execução aparece no painel da factory'
         required: false
       FACTORY_APP_ID:
         description: Id do GitHub App da factory (opcional). Com ele a factory lê e abre PRs em outros repositórios da organização
@@ -90,6 +97,11 @@ jobs:
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
       # Com o app da factory a issue pode ser resolvida em mais de um repositório.
       HAS_APP: ${{ secrets.FACTORY_APP_ID != '' && secrets.FACTORY_APP_PRIVATE_KEY != '' }}
+      # Painel da factory no FG Tracker (README, "Painel no FG Tracker"). Aqui fica só se há token:
+      # o valor entra apenas no ambiente dos passos "Painel", nunca no do agente nem no dos
+      # comandos do repositório (setup e validate).
+      REPORT: ${{ secrets.FG_TRACKER_FACTORY_TOKEN != '' }}
+      TRACKER_URL: ${{ inputs.tracker_url }}
     steps:
       - name: Segredos da factory presentes
         env:
@@ -102,8 +114,10 @@ jobs:
           fi
 
       - name: Máquina sem credenciais de produção
+        id: policy
         run: |
           set -euo pipefail
+          echo "started=$(date +%s)" >> "$GITHUB_OUTPUT"
           problems=()
           if [ -e "$HOME/.aws/credentials" ] || [ -e "$HOME/.aws/config" ]; then problems+=("~/.aws existe"); fi
           for name in AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_PROFILE DATABASE_URL IDENTITY_DATABASE_URL; do
@@ -188,6 +202,57 @@ jobs:
           gh issue edit "$ISSUE" --repo "$REPO" --add-label "fg-factory:working" >/dev/null
           echo "go=true" >> "$GITHUB_OUTPUT"
 
+      - name: 'Painel: início da execução'
+        id: report_start
+        if: always() && env.REPORT == 'true' && steps.policy.outcome != 'skipped' && (steps.issue.outputs.go == 'true' || steps.policy.outcome == 'failure' || steps.issue.outcome == 'failure')
+        continue-on-error: true
+        env:
+          FG_TRACKER_FACTORY_TOKEN: ${{ secrets.FG_TRACKER_FACTORY_TOKEN }}
+          WORK: ${{ steps.issue.outputs.work }}
+          T_POLICY: ${{ steps.policy.outputs.started }}
+          T_ISSUE: ${{ steps.issue.outputs.started }}
+          S_POLICY: ${{ steps.policy.outcome }}
+          S_ISSUE: ${{ steps.issue.outcome }}
+          GO: ${{ steps.issue.outputs.go }}
+          ATTEMPT: ${{ steps.issue.outputs.attempt }}
+          HAS_SETUP: ${{ inputs.setup != '' }}
+        run: |
+          set +e
+          # Relata ao painel do FG Tracker. Lê os eventos (JSON) da entrada. O token vai num
+          # descritor de arquivo, fora dos argumentos do curl. Nunca falha nem segura o job.
+          report() {
+            local body code
+            body="$(jq -c --arg repo "$REPO" --arg run "$GITHUB_RUN_ID" --arg attempt "${GITHUB_RUN_ATTEMPT:-1}" --arg issue "$ISSUE" \
+              '{repository: $repo, runId: $run, runAttempt: ($attempt | tonumber), issueNumber: ($issue | tonumber), events: map(select(. != null))}')" || return 0
+            [ "$(jq '.events | length' <<< "$body")" -gt 0 ] || return 0
+            code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 3 --max-time 8 -X POST "${TRACKER_URL%/}/v1/factory/events" \
+              -H 'content-type: application/json' -H @/dev/fd/3 --data-binary @- <<< "$body" 3<<< "Authorization: Bearer $FG_TRACKER_FACTORY_TOKEN" 2>/dev/null)"
+            if [ "$code" != "200" ]; then echo "::notice title=Painel do FG Tracker::Relato não enviado (HTTP ${code:-sem resposta}). A execução segue normalmente."; fi
+            return 0
+          }
+          # O resultado de um passo do Actions como o painel o entende; vazio = o passo não rodou.
+          status() { case "$1" in success) echo ok ;; failure|cancelled) echo failed ;; *) echo "" ;; esac; }
+          now="$(date +%s)"
+          title=""; url=""
+          if [ -n "${WORK:-}" ] && [ -s "$WORK/issue.json" ]; then
+            title="$(jq -r '(.title // "") | .[0:300]' "$WORK/issue.json" 2>/dev/null)"
+            url="$(jq -r '.html_url // ""' "$WORK/issue.json" 2>/dev/null)"
+          fi
+          jq -n --arg title "$title" --arg url "$url" --arg attempt "${ATTEMPT:-}" --arg run_url "$RUN_URL" --arg runner "${RUNNER_NAME:-}" \
+                --arg t_policy "${T_POLICY:-$now}" --arg t_issue "${T_ISSUE:-}" --arg now "$now" \
+                --arg s_policy "$(status "$S_POLICY")" --arg s_issue "$(status "$S_ISSUE")" --arg go "${GO:-}" --arg has_setup "$HAS_SETUP" '
+            def at($t): $t | tonumber | todate;
+            def clean: with_entries(select(.value != null and .value != ""));
+            [ ({type: "run.started", at: at($t_policy), issueTitle: $title, issueUrl: $url, runUrl: $run_url, runner: $runner,
+                attempt: (if $attempt == "" then null else ($attempt | tonumber) end)} | clean),
+              {type: "step.started", step: "policy", at: at($t_policy)},
+              (if $s_policy == "" then null else {type: "step.finished", step: "policy", status: $s_policy, at: at(if $t_issue == "" then $now else $t_issue end)} end),
+              (if $t_issue == "" then null else {type: "step.started", step: "issue", at: at($t_issue)} end),
+              (if $t_issue == "" or $s_issue == "" then null else {type: "step.finished", step: "issue", status: $s_issue, at: at($now)} end),
+              (if $go != "true" then null
+               elif $has_setup == "true" then {type: "step.started", step: "setup", at: at($now)}
+               else {type: "step.finished", step: "setup", status: "skipped", at: at($now)} end) ]' | report
+
       - name: Preparar o repositório
         id: setup
         if: steps.issue.outputs.go == 'true' && inputs.setup != ''
@@ -207,6 +272,67 @@ jobs:
           owner: ${{ github.repository_owner }}
           permission-contents: read
           permission-metadata: read
+
+      - name: 'Painel: repositório preparado'
+        if: always() && env.REPORT == 'true' && steps.issue.outputs.go == 'true'
+        continue-on-error: true
+        env:
+          FG_TRACKER_FACTORY_TOKEN: ${{ secrets.FG_TRACKER_FACTORY_TOKEN }}
+          WORK: ${{ steps.issue.outputs.work }}
+          S_SETUP: ${{ steps.setup.outcome }}
+          REPORT_LOGS: ${{ inputs.report_logs }}
+        run: |
+          set +e
+          # Relata ao painel do FG Tracker. Lê os eventos (JSON) da entrada. O token vai num
+          # descritor de arquivo, fora dos argumentos do curl. Nunca falha nem segura o job.
+          report() {
+            local body code
+            body="$(jq -c --arg repo "$REPO" --arg run "$GITHUB_RUN_ID" --arg attempt "${GITHUB_RUN_ATTEMPT:-1}" --arg issue "$ISSUE" \
+              '{repository: $repo, runId: $run, runAttempt: ($attempt | tonumber), issueNumber: ($issue | tonumber), events: map(select(. != null))}')" || return 0
+            [ "$(jq '.events | length' <<< "$body")" -gt 0 ] || return 0
+            code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 3 --max-time 8 -X POST "${TRACKER_URL%/}/v1/factory/events" \
+              -H 'content-type: application/json' -H @/dev/fd/3 --data-binary @- <<< "$body" 3<<< "Authorization: Bearer $FG_TRACKER_FACTORY_TOKEN" 2>/dev/null)"
+            if [ "$code" != "200" ]; then echo "::notice title=Painel do FG Tracker::Relato não enviado (HTTP ${code:-sem resposta}). A execução segue normalmente."; fi
+            return 0
+          }
+          # O resultado de um passo do Actions como o painel o entende; vazio = o passo não rodou.
+          status() { case "$1" in success) echo ok ;; failure|cancelled) echo failed ;; *) echo "" ;; esac; }
+          now="$(date +%s)"
+          agent_runs=true
+          if [ "$S_SETUP" = "failure" ] || [ "$S_SETUP" = "cancelled" ]; then agent_runs=false; fi
+          jq -n --arg now "$now" --arg s_setup "$(status "$S_SETUP")" --arg agent "$agent_runs" '
+            def at($t): $t | tonumber | todate;
+            [ (if $s_setup == "" then null else {type: "step.finished", step: "setup", status: $s_setup, at: at($now)} end),
+              (if $agent == "true" then {type: "step.started", step: "agent", at: at($now)} else null end) ]' | report
+          # Acompanha o log da sessão em segundo plano e envia em lotes de até 100 linhas. O token
+          # entra pelo descritor 3 e fica só na memória deste processo: não está no ambiente dele,
+          # em arquivo nem em argumentos. O passo depois da sessão o encerra e envia o resto.
+          if [ "$REPORT_LOGS" = "true" ] && [ "$agent_runs" = "true" ] && [ -n "${WORK:-}" ]; then
+            mkdir -p "$WORK/out" && : > "$WORK/out/session.log"
+            state="$RUNNER_TEMP/factory-log-$GITHUB_RUN_ID"
+            # O arquivo .pid existe antes de o processo começar: é ele que mantém o laço rodando.
+            echo 1 > "$state.seq"; : > "$state.pid"
+            stream='
+              IFS= read -r token <&3; exec 3<&-
+              file="$1"; url="$2"; repo="$3"; run="$4"; attempt="$5"; issue="$6"; state="$7"
+              seq=1; ticks=0
+              while [ -e "$state.pid" ] && [ "$seq" -le 50000 ] && [ "$ticks" -lt 7200 ]; do
+                sleep 3; ticks=$((ticks + 1))
+                for _ in 1 2 3 4 5; do
+                  total="$(wc -l < "$file" 2>/dev/null || echo 0)"
+                  [ "$total" -ge "$seq" ] || break
+                  code="$(sed -n "${seq},$((seq + 99))p" "$file" | jq -Rnc --arg repo "$repo" --arg run "$run" --arg attempt "$attempt" --arg issue "$issue" --arg first "$seq" \
+                    "{repository: \$repo, runId: \$run, runAttempt: (\$attempt | tonumber), issueNumber: (\$issue | tonumber), firstSeq: (\$first | tonumber), lines: [inputs | .[0:2000]]}" \
+                    | curl -sS -o /dev/null -w "%{http_code}" --connect-timeout 3 --max-time 10 -X POST "${url%/}/v1/factory/logs" \
+                        -H "content-type: application/json" -H @/dev/fd/4 --data-binary @- 4<<< "Authorization: Bearer $token" 2>/dev/null)"
+                  # 200: gravado. 400, 409 e 413: este lote nunca vai entrar; segue para o próximo. Outro: tenta de novo depois.
+                  case "$code" in 200|400|409|413) last=$((seq + 99)); [ "$last" -le "$total" ] || last="$total"; seq=$((last + 1)); echo "$seq" > "$state.seq" ;; *) break ;; esac
+                done
+              done'
+            nohup env -u FG_TRACKER_FACTORY_TOKEN bash -c "$stream" factory-log-stream "$WORK/out/session.log" "$TRACKER_URL" "$REPO" "$GITHUB_RUN_ID" "${GITHUB_RUN_ATTEMPT:-1}" "$ISSUE" "$state" \
+              > /dev/null 2>&1 3<<< "$FG_TRACKER_FACTORY_TOKEN" &
+            echo $! > "$state.pid"
+          fi
 
       - name: Triagem e correção
         id: agent
@@ -317,6 +443,59 @@ jobs:
             || { echo "::error::O agente não deixou um result.json válido."; exit 1; }
           echo "decision=$(jq -r .decision "$WORK/out/result.json")" >> "$GITHUB_OUTPUT"
 
+      - name: 'Painel: sessão terminada'
+        if: always() && env.REPORT == 'true' && steps.issue.outputs.go == 'true'
+        continue-on-error: true
+        env:
+          FG_TRACKER_FACTORY_TOKEN: ${{ secrets.FG_TRACKER_FACTORY_TOKEN }}
+          WORK: ${{ steps.issue.outputs.work }}
+          S_AGENT: ${{ steps.agent.outcome }}
+          DECISION: ${{ steps.agent.outputs.decision }}
+          HAS_VALIDATE: ${{ inputs.validate != '' }}
+        run: |
+          set +e
+          # Relata ao painel do FG Tracker. Lê os eventos (JSON) da entrada. O token vai num
+          # descritor de arquivo, fora dos argumentos do curl. Nunca falha nem segura o job.
+          report() {
+            local body code
+            body="$(jq -c --arg repo "$REPO" --arg run "$GITHUB_RUN_ID" --arg attempt "${GITHUB_RUN_ATTEMPT:-1}" --arg issue "$ISSUE" \
+              '{repository: $repo, runId: $run, runAttempt: ($attempt | tonumber), issueNumber: ($issue | tonumber), events: map(select(. != null))}')" || return 0
+            [ "$(jq '.events | length' <<< "$body")" -gt 0 ] || return 0
+            code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 3 --max-time 8 -X POST "${TRACKER_URL%/}/v1/factory/events" \
+              -H 'content-type: application/json' -H @/dev/fd/3 --data-binary @- <<< "$body" 3<<< "Authorization: Bearer $FG_TRACKER_FACTORY_TOKEN" 2>/dev/null)"
+            if [ "$code" != "200" ]; then echo "::notice title=Painel do FG Tracker::Relato não enviado (HTTP ${code:-sem resposta}). A execução segue normalmente."; fi
+            return 0
+          }
+          # O resultado de um passo do Actions como o painel o entende; vazio = o passo não rodou.
+          status() { case "$1" in success) echo ok ;; failure|cancelled) echo failed ;; *) echo "" ;; esac; }
+          now="$(date +%s)"
+          # Encerra o acompanhamento do log e envia o que faltou (no máximo 2.000 linhas aqui).
+          state="$RUNNER_TEMP/factory-log-$GITHUB_RUN_ID"
+          if [ -e "$state.pid" ]; then
+            kill "$(cat "$state.pid")" 2>/dev/null; rm -f "$state.pid"
+            next="$(cat "$state.seq" 2>/dev/null)"; case "$next" in ''|*[!0-9]*) next=1 ;; esac
+            file="$WORK/out/session.log"
+            for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+              total="$(awk 'END { print NR }' "$file" 2>/dev/null || echo 0)"
+              [ "$total" -ge "$next" ] && [ "$next" -le 50000 ] || break
+              code="$(sed -n "${next},$((next + 99))p" "$file" | jq -Rnc --arg repo "$REPO" --arg run "$GITHUB_RUN_ID" --arg attempt "${GITHUB_RUN_ATTEMPT:-1}" --arg issue "$ISSUE" --arg first "$next" \
+                '{repository: $repo, runId: $run, runAttempt: ($attempt | tonumber), issueNumber: ($issue | tonumber), firstSeq: ($first | tonumber), lines: [inputs | .[0:2000]]}' \
+                | curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 3 --max-time 8 -X POST "${TRACKER_URL%/}/v1/factory/logs" \
+                    -H 'content-type: application/json' -H @/dev/fd/3 --data-binary @- 3<<< "Authorization: Bearer $FG_TRACKER_FACTORY_TOKEN" 2>/dev/null)"
+              case "$code" in 200|400|409|413) next=$((next + 100)) ;; *) echo "::notice title=Painel do FG Tracker::O fim do log não foi enviado (HTTP ${code:-sem resposta})."; break ;; esac
+            done
+            rm -f "$state.seq"
+          fi
+          jq -n --arg now "$now" --arg s_agent "$(status "$S_AGENT")" --arg decision "${DECISION:-}" --arg has_validate "$HAS_VALIDATE" '
+            def at($t): $t | tonumber | todate;
+            def started($step): {type: "step.started", step: $step, at: at($now)};
+            def skipped($step): {type: "step.finished", step: $step, status: "skipped", at: at($now)};
+            [ (if $s_agent == "" then null else {type: "step.finished", step: "agent", status: $s_agent, at: at($now)} end) ]
+            + (if $s_agent != "ok" then []
+               elif $decision == "fix" then (if $has_validate == "true" then [started("validate")] else [skipped("validate"), started("validate_others")] end)
+               elif $decision == "ignore" or $decision == "needs-human" then [skipped("validate"), skipped("validate_others"), started("publish")]
+               else [] end)' | report
+
       - name: Montar o comentário da issue
         if: steps.agent.outputs.decision != ''
         env:
@@ -365,6 +544,34 @@ jobs:
           VALIDATE: ${{ inputs.validate }}
         run: bash -euo pipefail -c "$VALIDATE"
 
+      - name: 'Painel: validação terminada'
+        if: always() && env.REPORT == 'true' && steps.agent.outputs.decision == 'fix' && inputs.validate != ''
+        continue-on-error: true
+        env:
+          FG_TRACKER_FACTORY_TOKEN: ${{ secrets.FG_TRACKER_FACTORY_TOKEN }}
+          S_VALIDATE: ${{ steps.validate.outcome }}
+        run: |
+          set +e
+          # Relata ao painel do FG Tracker. Lê os eventos (JSON) da entrada. O token vai num
+          # descritor de arquivo, fora dos argumentos do curl. Nunca falha nem segura o job.
+          report() {
+            local body code
+            body="$(jq -c --arg repo "$REPO" --arg run "$GITHUB_RUN_ID" --arg attempt "${GITHUB_RUN_ATTEMPT:-1}" --arg issue "$ISSUE" \
+              '{repository: $repo, runId: $run, runAttempt: ($attempt | tonumber), issueNumber: ($issue | tonumber), events: map(select(. != null))}')" || return 0
+            [ "$(jq '.events | length' <<< "$body")" -gt 0 ] || return 0
+            code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 3 --max-time 8 -X POST "${TRACKER_URL%/}/v1/factory/events" \
+              -H 'content-type: application/json' -H @/dev/fd/3 --data-binary @- <<< "$body" 3<<< "Authorization: Bearer $FG_TRACKER_FACTORY_TOKEN" 2>/dev/null)"
+            if [ "$code" != "200" ]; then echo "::notice title=Painel do FG Tracker::Relato não enviado (HTTP ${code:-sem resposta}). A execução segue normalmente."; fi
+            return 0
+          }
+          # O resultado de um passo do Actions como o painel o entende; vazio = o passo não rodou.
+          status() { case "$1" in success) echo ok ;; failure|cancelled) echo failed ;; *) echo "" ;; esac; }
+          now="$(date +%s)"
+          jq -n --arg now "$now" --arg s "$(status "$S_VALIDATE")" '
+            def at($t): $t | tonumber | todate;
+            [ (if $s == "" then null else {type: "step.finished", step: "validate", status: $s, at: at($now)} end),
+              (if $s == "ok" then {type: "step.started", step: "validate_others", at: at($now)} else null end) ]' | report
+
       # Um repositório alterado fora deste é validado com os comandos que ele mesmo declara
       # no seu .github/workflows/factory.yml (lidos do commit original, não da cópia de trabalho).
       - name: Validar os outros repositórios
@@ -393,6 +600,34 @@ jobs:
             echo "::endgroup::"
             printf '%s' "$validate" > "$WORK/validated/$name"
           done
+
+      - name: 'Painel: outros repositórios validados'
+        if: always() && env.REPORT == 'true' && steps.agent.outputs.decision == 'fix'
+        continue-on-error: true
+        env:
+          FG_TRACKER_FACTORY_TOKEN: ${{ secrets.FG_TRACKER_FACTORY_TOKEN }}
+          S_OTHERS: ${{ steps.validate_others.outcome }}
+        run: |
+          set +e
+          # Relata ao painel do FG Tracker. Lê os eventos (JSON) da entrada. O token vai num
+          # descritor de arquivo, fora dos argumentos do curl. Nunca falha nem segura o job.
+          report() {
+            local body code
+            body="$(jq -c --arg repo "$REPO" --arg run "$GITHUB_RUN_ID" --arg attempt "${GITHUB_RUN_ATTEMPT:-1}" --arg issue "$ISSUE" \
+              '{repository: $repo, runId: $run, runAttempt: ($attempt | tonumber), issueNumber: ($issue | tonumber), events: map(select(. != null))}')" || return 0
+            [ "$(jq '.events | length' <<< "$body")" -gt 0 ] || return 0
+            code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 3 --max-time 8 -X POST "${TRACKER_URL%/}/v1/factory/events" \
+              -H 'content-type: application/json' -H @/dev/fd/3 --data-binary @- <<< "$body" 3<<< "Authorization: Bearer $FG_TRACKER_FACTORY_TOKEN" 2>/dev/null)"
+            if [ "$code" != "200" ]; then echo "::notice title=Painel do FG Tracker::Relato não enviado (HTTP ${code:-sem resposta}). A execução segue normalmente."; fi
+            return 0
+          }
+          # O resultado de um passo do Actions como o painel o entende; vazio = o passo não rodou.
+          status() { case "$1" in success) echo ok ;; failure|cancelled) echo failed ;; *) echo "" ;; esac; }
+          now="$(date +%s)"
+          jq -n --arg now "$now" --arg s "$(status "$S_OTHERS")" '
+            def at($t): $t | tonumber | todate;
+            [ (if $s == "" then null else {type: "step.finished", step: "validate_others", status: $s, at: at($now)} end),
+              (if $s == "ok" then {type: "step.started", step: "publish", at: at($now)} else null end) ]' | report
 
       # Nasce só agora, depois da validação: o agente já terminou e nunca vê esta credencial.
       - name: Credencial de publicação
@@ -498,7 +733,48 @@ jobs:
           gh issue comment "$ISSUE" --repo "$REPO" --body-file "$WORK/comment.md"
           touch "$WORK/posted"
 
+      - name: 'Painel: publicação terminada'
+        id: report_publish
+        if: always() && env.REPORT == 'true' && steps.report_start.outcome != '' && steps.report_start.outcome != 'skipped'
+        continue-on-error: true
+        env:
+          FG_TRACKER_FACTORY_TOKEN: ${{ secrets.FG_TRACKER_FACTORY_TOKEN }}
+          WORK: ${{ steps.issue.outputs.work }}
+          S_PUBLISH: ${{ steps.publish.outcome }}
+          S_TRIAGE: ${{ steps.triage.outcome }}
+          GO: ${{ steps.issue.outputs.go }}
+        run: |
+          set +e
+          # Relata ao painel do FG Tracker. Lê os eventos (JSON) da entrada. O token vai num
+          # descritor de arquivo, fora dos argumentos do curl. Nunca falha nem segura o job.
+          report() {
+            local body code
+            body="$(jq -c --arg repo "$REPO" --arg run "$GITHUB_RUN_ID" --arg attempt "${GITHUB_RUN_ATTEMPT:-1}" --arg issue "$ISSUE" \
+              '{repository: $repo, runId: $run, runAttempt: ($attempt | tonumber), issueNumber: ($issue | tonumber), events: map(select(. != null))}')" || return 0
+            [ "$(jq '.events | length' <<< "$body")" -gt 0 ] || return 0
+            code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 3 --max-time 8 -X POST "${TRACKER_URL%/}/v1/factory/events" \
+              -H 'content-type: application/json' -H @/dev/fd/3 --data-binary @- <<< "$body" 3<<< "Authorization: Bearer $FG_TRACKER_FACTORY_TOKEN" 2>/dev/null)"
+            if [ "$code" != "200" ]; then echo "::notice title=Painel do FG Tracker::Relato não enviado (HTTP ${code:-sem resposta}). A execução segue normalmente."; fi
+            return 0
+          }
+          # O resultado de um passo do Actions como o painel o entende; vazio = o passo não rodou.
+          status() { case "$1" in success) echo ok ;; failure|cancelled) echo failed ;; *) echo "" ;; esac; }
+          now="$(date +%s)"
+          s="$(status "$S_PUBLISH")"; if [ -z "$s" ]; then s="$(status "$S_TRIAGE")"; fi
+          jq -n --arg now "$now" --arg s "$s" --arg go "${GO:-}" '
+            def at($t): $t | tonumber | todate;
+            [ (if $s == "" then null else {type: "step.finished", step: "publish", status: $s, at: at($now)} end),
+              (if $go == "true" then {type: "step.started", step: "finish", at: at($now)} else null end) ]' | report
+          # O último passo apaga $WORK: a frase de conclusão e os PRs ficam nas saídas deste passo.
+          headline=""; prs="[]"
+          if [ -n "${WORK:-}" ]; then
+            if [ -s "$WORK/out/result.json" ]; then headline="$(jq -r '(.headline // .summary // "") | tostring | .[0:500]' "$WORK/out/result.json" 2>/dev/null)"; fi
+            if [ -s "$WORK/published.md" ]; then prs="$(grep -oE 'https://[^) ]+/pull/[0-9]+' "$WORK/published.md" | jq -Rnc '[inputs] | unique | .[0:20]' 2>/dev/null)"; fi
+          fi
+          echo "summary=$(jq -nc --arg headline "$headline" --argjson prs "${prs:-[]}" '{headline: $headline, prUrls: $prs}')" >> "$GITHUB_OUTPUT"
+
       - name: Encerrar
+        id: finish
         if: always() && steps.issue.outputs.go == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -532,3 +808,54 @@ jobs:
             gh issue comment "$ISSUE" --repo "$REPO" --body-file "$WORK/failed.md" >/dev/null 2>&1 || true
           fi
           rm -rf "$WORK"
+
+      - name: 'Painel: fim da execução'
+        if: always() && env.REPORT == 'true' && steps.report_start.outcome != '' && steps.report_start.outcome != 'skipped'
+        continue-on-error: true
+        env:
+          FG_TRACKER_FACTORY_TOKEN: ${{ secrets.FG_TRACKER_FACTORY_TOKEN }}
+          JOB: ${{ job.status }}
+          DECISION: ${{ steps.agent.outputs.decision }}
+          SUMMARY: ${{ steps.report_publish.outputs.summary }}
+          T_POLICY: ${{ steps.policy.outputs.started }}
+          S_FINISH: ${{ steps.finish.outcome }}
+          STEPS: >-
+            policy=${{ steps.policy.outcome }} issue=${{ steps.issue.outcome }} setup=${{ steps.setup.outcome }}
+            agent=${{ steps.agent.outcome }} validate=${{ steps.validate.outcome }} validate_others=${{ steps.validate_others.outcome }}
+            publish=${{ steps.publish.outcome }} publish=${{ steps.triage.outcome }} finish=${{ steps.finish.outcome }}
+        run: |
+          set +e
+          # Relata ao painel do FG Tracker. Lê os eventos (JSON) da entrada. O token vai num
+          # descritor de arquivo, fora dos argumentos do curl. Nunca falha nem segura o job.
+          report() {
+            local body code
+            body="$(jq -c --arg repo "$REPO" --arg run "$GITHUB_RUN_ID" --arg attempt "${GITHUB_RUN_ATTEMPT:-1}" --arg issue "$ISSUE" \
+              '{repository: $repo, runId: $run, runAttempt: ($attempt | tonumber), issueNumber: ($issue | tonumber), events: map(select(. != null))}')" || return 0
+            [ "$(jq '.events | length' <<< "$body")" -gt 0 ] || return 0
+            code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 3 --max-time 8 -X POST "${TRACKER_URL%/}/v1/factory/events" \
+              -H 'content-type: application/json' -H @/dev/fd/3 --data-binary @- <<< "$body" 3<<< "Authorization: Bearer $FG_TRACKER_FACTORY_TOKEN" 2>/dev/null)"
+            if [ "$code" != "200" ]; then echo "::notice title=Painel do FG Tracker::Relato não enviado (HTTP ${code:-sem resposta}). A execução segue normalmente."; fi
+            return 0
+          }
+          # O resultado de um passo do Actions como o painel o entende; vazio = o passo não rodou.
+          status() { case "$1" in success) echo ok ;; failure|cancelled) echo failed ;; *) echo "" ;; esac; }
+          now="$(date +%s)"
+          # Em ordem: o primeiro passo que falhou (ou foi cancelado) é onde a execução parou.
+          failed=""
+          for pair in $STEPS; do
+            case "${pair#*=}" in failure|cancelled) failed="${pair%%=*}"; break ;; esac
+          done
+          outcome=failed
+          if [ "$JOB" = "success" ]; then
+            case "${DECISION:-}" in fix) outcome=fix ;; ignore) outcome=ignore ;; needs-human) outcome=needs_human ;; esac
+          fi
+          if [ "$outcome" != "failed" ]; then failed=""; fi
+          summary="$(jq -c 'objects' <<< "${SUMMARY:-}" 2>/dev/null)"; [ -n "$summary" ] || summary='{}'
+          jq -n --arg now "$now" --arg outcome "$outcome" --arg failed "$failed" --arg s_finish "$(status "$S_FINISH")" \
+                --arg t_policy "${T_POLICY:-$now}" --argjson summary "$summary" '
+            def at($t): $t | tonumber | todate;
+            [ (if $s_finish == "" then null else {type: "step.finished", step: "finish", status: $s_finish, at: at($now)} end),
+              ({type: "run.finished", at: at($now), outcome: $outcome, failedStep: $failed,
+                prUrls: (if $outcome == "fix" then ($summary.prUrls // []) else [] end), headline: ($summary.headline // ""),
+                durationMs: ((($now | tonumber) - ($t_policy | tonumber)) * 1000)}
+               | with_entries(select(.value != null and .value != ""))) ]' | report

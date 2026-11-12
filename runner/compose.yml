@@ -13,6 +13,10 @@ x-runner: &runner
   environment: &env
     FACTORY_ORG: ${FACTORY_ORG:?defina FACTORY_ORG}
     FACTORY_REGISTRATION_TOKEN: ${FACTORY_REGISTRATION_TOKEN:-}
+    FACTORY_MACHINE: ${FACTORY_MACHINE:-}
+    # Opcional: o sinal do runner para o painel da factory no FG Tracker (README).
+    FG_TRACKER_FACTORY_TOKEN: ${FG_TRACKER_FACTORY_TOKEN:-}
+    FG_TRACKER_URL: ${FG_TRACKER_URL:-https://tracker-api.fortground.com.br}
 
 services:
   runner1:

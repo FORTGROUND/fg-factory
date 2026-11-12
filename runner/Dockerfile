@@ -37,5 +37,12 @@ RUN set -eu; \
     mkdir -p runner && cd runner \
  && curl -fsSL "https://github.com/actions/runner/releases/download/v${version}/actions-runner-${pkg}-${version}.tar.gz" | tar -xz
 
-COPY --chown=factory:factory entrypoint.sh /home/factory/entrypoint.sh
-ENTRYPOINT ["/bin/bash", "/home/factory/entrypoint.sh"]
+# O entrypoint começa como root só para separar o usuário que envia o sinal ao painel da factory
+# (factory-report, o único que lê o token do painel) do usuário dos jobs, e troca para `factory`
+# antes de o runner subir. Os dois scripts são do root: o usuário dos jobs não os altera.
+USER root
+RUN useradd --system --no-create-home --shell /usr/sbin/nologin factory-report
+COPY --chown=root:root --chmod=0755 heartbeat.sh /usr/local/lib/fg-factory/heartbeat.sh
+COPY --chown=root:root --chmod=0755 entrypoint.sh /usr/local/lib/fg-factory/entrypoint.sh
+WORKDIR /home/factory
+ENTRYPOINT ["/bin/bash", "/usr/local/lib/fg-factory/entrypoint.sh"]

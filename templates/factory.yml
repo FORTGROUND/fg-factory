@@ -32,11 +32,16 @@ jobs:
       # Comandos deste repositório. `validate` precisa passar para a correção ser publicada.
       setup: ''
       validate: ''
+      # Com o segredo do painel (abaixo), envia também o log da sessão ao FG Tracker.
+      # report_logs: true
     secrets:
       # A credencial do Claude: o token da assinatura ou a chave da API (basta uma).
       CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.FACTORY_CLAUDE_TOKEN }}
       ANTHROPIC_API_KEY: ${{ secrets.FACTORY_ANTHROPIC_API_KEY }}
       FG_TRACKER_TOKEN: ${{ secrets.FACTORY_FG_TRACKER_TOKEN }}
+      # Opcional: mostra as execuções no painel da factory do FG Tracker. Um token só com a
+      # permissão "FG Factory: relatar"; não é o token de leitura de cima.
+      FG_TRACKER_FACTORY_TOKEN: ${{ secrets.FACTORY_FG_TRACKER_PANEL_TOKEN }}
       # Opcionais: o GitHub App da factory, para correções que passam por outros repositórios.
       FACTORY_APP_ID: ${{ secrets.FACTORY_APP_ID }}
       FACTORY_APP_PRIVATE_KEY: ${{ secrets.FACTORY_APP_PRIVATE_KEY }}

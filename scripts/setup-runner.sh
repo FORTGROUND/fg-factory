@@ -11,6 +11,10 @@
 #   quantidade         quantas issues esta máquina faz ao mesmo tempo (padrão 1)
 #
 # Cada runner executa um job por vez: a quantidade é o limite de trabalho simultâneo da máquina.
+#
+# Painel da factory no FG Tracker: o runner direto na máquina ainda não envia o sinal (aqui o
+# sinal rodaria como o mesmo usuário dos jobs, com o token ao alcance deles). As execuções
+# aparecem no painel pelo workflow; para ver a máquina, use o runner em contêiner (README).
 set -euo pipefail
 TOKEN="${1:?Informe o token de registro}"
 ORG="${2:?Informe a organização (ou dono/repositório)}"

@@ -20,7 +20,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | bash - \
  && apt-get install -y --no-install-recommends gh nodejs \
       docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin iptables \
- && npm install -g "pnpm@${PNPM_VERSION}" @anthropic-ai/claude-code \
+ && npm install -g "pnpm@${PNPM_VERSION}" @anthropic-ai/claude-code @openai/codex \
  && rm -rf /var/lib/apt/lists/* /root/.npm
 
 # Usuário sem privilégios e sem sudo: o agente roda como ele.
@@ -33,7 +33,7 @@ WORKDIR /home/factory
 # Rust na versão fixada pelos repositórios (rust-toolchain.toml baixa outra se precisar).
 ENV PATH=/home/factory/.cargo/bin:$PATH
 RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain "${RUST_VERSION}" --component rustfmt,clippy \
- && mkdir -p /home/factory/.cargo/registry
+ && mkdir -p /home/factory/.cargo/registry /home/factory/.codex
 
 # O runner do GitHub Actions, da versão mais recente no momento do build.
 RUN set -eu; \

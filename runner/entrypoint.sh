@@ -18,7 +18,8 @@ PANEL_TOKEN="${FG_TRACKER_FACTORY_TOKEN:-${FG_TRACKER_TOKEN:-}}"
 # workflow as lê de um arquivo do usuário dos jobs quando o repositório não grava os segredos.
 CREDENTIALS_FILE=/home/factory/.fg-factory/credentials
 STORED_CLAUDE="${CLAUDE_CODE_OAUTH_TOKEN:-}"; STORED_API_KEY="${ANTHROPIC_API_KEY:-}"; STORED_TRACKER="${FG_TRACKER_TOKEN:-}"
-unset CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY FG_TRACKER_TOKEN
+STORED_OPENAI="${OPENAI_API_KEY:-}"
+unset CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY FG_TRACKER_TOKEN OPENAI_API_KEY
 PANEL_URL="${FG_TRACKER_URL:-https://tracker-api.fortground.com.br}"
 REGISTRATION_TOKEN="${FACTORY_REGISTRATION_TOKEN:-}"
 unset FG_TRACKER_FACTORY_TOKEN FACTORY_REGISTRATION_TOKEN
@@ -49,7 +50,7 @@ if [ "${FACTORY_DOCKER:-}" = "true" ]; then
     rm -f /var/run/docker.pid /var/run/docker.sock
     # Sem os tokens deste script no ambiente; volta sozinho se cair.
     ( while true; do
-        env -u FG_TRACKER_FACTORY_TOKEN -u FACTORY_REGISTRATION_TOKEN -u FG_TRACKER_TOKEN -u CLAUDE_CODE_OAUTH_TOKEN -u ANTHROPIC_API_KEY dockerd --host=unix:///var/run/docker.sock >> /var/log/dockerd.log 2>&1 || true
+        env -u FG_TRACKER_FACTORY_TOKEN -u FACTORY_REGISTRATION_TOKEN -u FG_TRACKER_TOKEN -u CLAUDE_CODE_OAUTH_TOKEN -u ANTHROPIC_API_KEY -u OPENAI_API_KEY dockerd --host=unix:///var/run/docker.sock >> /var/log/dockerd.log 2>&1 || true
         rm -f /var/run/docker.pid
         sleep 3
       done ) &
@@ -63,16 +64,19 @@ fi
 
 if [ "$(id -u)" = "0" ]; then
   rm -rf "$(dirname "$CREDENTIALS_FILE")"
-  if [ -n "$STORED_CLAUDE$STORED_API_KEY$STORED_TRACKER" ]; then
+  # O volume do login do Codex nasce do root em algumas versões do Docker.
+  chown factory:factory /home/factory/.codex 2>/dev/null || true
+  if [ -n "$STORED_CLAUDE$STORED_API_KEY$STORED_TRACKER$STORED_OPENAI" ]; then
     install -d -m 0700 -o factory -g factory "$(dirname "$CREDENTIALS_FILE")"
     ( umask 077
       { [ -z "$STORED_CLAUDE" ] || printf 'CLAUDE_CODE_OAUTH_TOKEN=%s\n' "$STORED_CLAUDE"
         [ -z "$STORED_API_KEY" ] || printf 'ANTHROPIC_API_KEY=%s\n' "$STORED_API_KEY"
+        [ -z "$STORED_OPENAI" ] || printf 'OPENAI_API_KEY=%s\n' "$STORED_OPENAI"
         [ -z "$STORED_TRACKER" ] || printf 'FG_TRACKER_TOKEN=%s\n' "$STORED_TRACKER"; } > "$CREDENTIALS_FILE" )
     chown factory:factory "$CREDENTIALS_FILE"
   fi
 fi
-unset STORED_CLAUDE STORED_API_KEY STORED_TRACKER
+unset STORED_CLAUDE STORED_API_KEY STORED_TRACKER STORED_OPENAI
 
 if [ ! -f .runner ]; then
   : "${REGISTRATION_TOKEN:?primeira subida: defina FACTORY_REGISTRATION_TOKEN (README)}"

@@ -31,6 +31,7 @@ ask() { # nome do segredo, texto
 }
 ask FACTORY_CLAUDE_TOKEN     "Token do Claude (claude setup-token)"
 ask FACTORY_ANTHROPIC_API_KEY "Ou a chave da API da Anthropic, se não usa o token acima"
+ask FACTORY_OPENAI_API_KEY "Só para sessões no Codex pela API: a chave da API da OpenAI"
 ask FACTORY_FG_TRACKER_TOKEN "Token do FG Tracker (modelo FG Factory, restrito a uma organização)"
 ask FACTORY_FG_TRACKER_PANEL_TOKEN "Opcional: token separado só para o painel (modelo FG Factory (relatos))"
 if [ -n "${2:-}" ] && [ -n "${3:-}" ]; then

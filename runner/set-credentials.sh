@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Guarda no runner as credenciais que valem para todos os repositórios atendidos por ele: a do
-# Claude Code e o token do FG Tracker. Com elas aqui, um repositório novo só precisa do
+# Claude Code (ou do Codex) e o token do FG Tracker. Com elas aqui, um repositório novo só precisa do
 # .github/workflows/factory.yml, sem segredos.
 #
 # Os valores são lidos sem aparecer na tela, vão só para o .env desta pasta (ignorado pelo git,
@@ -27,6 +27,7 @@ ask() {  # ask <VARIÁVEL> <pergunta>
 
 ask CLAUDE_CODE_OAUTH_TOKEN 'Token do Claude Code (o que `claude setup-token` imprime). Quem usa a chave da API deixa em branco'
 ask ANTHROPIC_API_KEY 'Chave da API da Anthropic. Quem usa o token acima deixa em branco'
+ask OPENAI_API_KEY 'Chave da API da OpenAI, só para quem roda o Codex pela API. Com a assinatura do ChatGPT, deixe em branco e rode `bash codex-login.sh` depois'
 ask FG_TRACKER_TOKEN 'Token do FG Tracker criado pelo modelo "FG Factory", restrito a uma organização'
 chmod 600 .env
 

@@ -66,6 +66,9 @@ jobs:
       review_model: ${{ inputs.review_model || '' }}
       review_effort: ${{ (inputs.review_effort != 'configurado' && inputs.review_effort) || '' }}
       # review_fast: 'true'
+      # Merge automático: com `true`, a factory faz o merge do PR sozinha quando a validação
+      # passa, o revisor aprova e os checks do PR ficam verdes. O padrão é parar no PR aberto.
+      # merge: true
       # Com o segredo do painel (abaixo), envia também o log da sessão ao FG Tracker.
       # report_logs: true
     secrets:

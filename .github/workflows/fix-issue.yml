@@ -76,6 +76,18 @@ on:
         description: Modo rápido do revisor - 'true' ou 'false' (vazio = o mesmo de `fast`)
         type: string
         default: ''
+      merge:
+        description: Faz o merge do pull request sozinho - só com a validação passando, o revisor aprovando e os checks do PR verdes. Sem isto a factory para no PR aberto
+        type: boolean
+        default: false
+      merge_method:
+        description: Como o merge é feito - squash, merge ou rebase
+        type: string
+        default: squash
+      merge_wait_minutes:
+        description: Quanto esperar pelos checks do PR antes de desistir do merge (1 a 45)
+        type: number
+        default: 30
       report_logs:
         description: Envia o log da sessão ao painel da factory no FG Tracker
         type: boolean
@@ -1012,7 +1024,9 @@ jobs:
             fi
             if url="$(GH_TOKEN="$token" gh pr create --repo "$repo" --base "$base" --head "$branch" --title "$(jq -r "$fields | .pr_title" "$result")" --body "$body" 2>"$WORK/pr.err")"; then
               where="[PR em \`$repo\`]($url)"
+              printf '%s\t%s\t%s\n' "$repo" "$url" "$(git -C "$dir" rev-parse HEAD)" >> "$WORK/prs.tsv"
             else
+              touch "$WORK/pr-missing"
               # A organização pode não permitir que o Actions abra PRs: o branch fica pronto.
               cat "$WORK/pr.err"
               where="Branch \`$branch\` em \`$repo\`; o PR não pôde ser aberto sozinho: [abra com um clique](https://github.com/$repo/compare/$base...$branch?expand=1)"
@@ -1027,6 +1041,92 @@ jobs:
             sed -n '/^---$/,$p' "$WORK/comment.md"; printf '<!-- factory:attempt -->\n'; } > "$WORK/comment.final.md"
           gh issue comment "$ISSUE" --repo "$REPO" --body-file "$WORK/comment.final.md"
           touch "$WORK/posted"
+
+      # Opcional (`merge: true`). Só depois de tudo: validação, revisão aprovada e os checks do
+      # próprio PR. Qualquer dúvida deixa o PR aberto para uma pessoa; nunca força um merge.
+      - name: Merge automático
+        id: merge
+        if: steps.publish.outcome == 'success' && inputs.merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          APP_TOKEN: ${{ steps.pubtoken.outputs.token }}
+          WORK: ${{ steps.issue.outputs.work }}
+          VERDICT: ${{ steps.review.outputs.verdict }}
+          METHOD: ${{ inputs.merge_method }}
+          WAIT_MINUTES: ${{ inputs.merge_wait_minutes }}
+        run: |
+          set -euo pipefail
+          token="${APP_TOKEN:-$GH_TOKEN}"
+          # Para sem merge: o PR fica aberto, a issue vai para uma pessoa e o comentário diz por quê.
+          hold() {
+            echo "::warning title=Merge automático::$1 O pull request fica aberto."
+            echo "merged=false" >> "$GITHUB_OUTPUT"
+            gh issue edit "$ISSUE" --repo "$REPO" --add-label "fg-factory:needs-human" >/dev/null 2>&1 || true
+            gh issue comment "$ISSUE" --repo "$REPO" --body "### Merge automático não feito"$'\n\n'"$1 O pull request fica aberto para uma pessoa decidir." >/dev/null 2>&1 || true
+            exit 0
+          }
+          case "$METHOD" in squash|merge|rebase) ;; *) echo "::error::merge_method inválido: '$METHOD'. Use squash, merge ou rebase."; exit 1 ;; esac
+          case "$WAIT_MINUTES" in ''|*[!0-9]*) WAIT_MINUTES=30 ;; esac
+          if [ "$WAIT_MINUTES" -lt 1 ]; then WAIT_MINUTES=1; fi
+          if [ "$WAIT_MINUTES" -gt 45 ]; then WAIT_MINUTES=45; fi
+
+          if [ "${VERDICT:-}" != "approve" ]; then hold "O merge automático exige a revisão independente aprovada, e a revisão está desligada (\`review: false\`)."; fi
+          if [ -e "$WORK/pr-missing" ] || [ ! -s "$WORK/prs.tsv" ]; then hold "Nem toda a correção virou pull request (algum repositório ficou só com o branch)."; fi
+
+          # 1. Todos os PRs precisam estar verdes antes de qualquer merge: ou entram todos, ou nenhum.
+          deadline=$(( $(date +%s) + WAIT_MINUTES * 60 ))
+          grace=$(( $(date +%s) + 90 ))   # tempo para os checks do PR aparecerem
+          while IFS=$'\t' read -r repo url sha; do
+            while true; do
+              state="$(GH_TOKEN="$token" gh pr view "$url" --json state,isDraft,mergeable,headRefOid,statusCheckRollup < /dev/null --jq '
+                (.statusCheckRollup // []) as $checks
+                | ($checks | map((.conclusion // .state // .status // "") | ascii_upcase)) as $results
+                | {state, isDraft, mergeable, head: .headRefOid, total: ($checks | length),
+                   failed: ($results | map(select(IN("FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE"))) | length),
+                   pending: ($results | map(select(IN("", "PENDING", "QUEUED", "IN_PROGRESS", "EXPECTED", "WAITING", "REQUESTED"))) | length)}')" \
+                || hold "Não consegui ler o estado de $url."
+              now=$(date +%s)
+              if [ "$(jq -r .state <<< "$state")" != "OPEN" ] || [ "$(jq -r .isDraft <<< "$state")" = "true" ]; then hold "O pull request $url não está mais aberto e pronto."; fi
+              if [ "$(jq -r .head <<< "$state")" != "$sha" ]; then hold "O pull request $url recebeu commits depois da revisão."; fi
+              if [ "$(jq -r .failed <<< "$state")" -gt 0 ]; then hold "Um check de $url falhou."; fi
+              if [ "$(jq -r .mergeable <<< "$state")" = "CONFLICTING" ]; then hold "O pull request $url tem conflito com a branch de destino."; fi
+              if [ "$(jq -r .pending <<< "$state")" -eq 0 ] && [ "$(jq -r .mergeable <<< "$state")" = "MERGEABLE" ] \
+                 && { [ "$(jq -r .total <<< "$state")" -gt 0 ] || [ "$now" -ge "$grace" ]; }; then
+                echo "$url: pronto ($(jq -r .total <<< "$state") checks)."; break
+              fi
+              if [ "$now" -ge "$deadline" ]; then hold "Os checks de $url não terminaram em $WAIT_MINUTES minutos."; fi
+              sleep 15
+            done
+          done < "$WORK/prs.tsv"
+
+          # 2. Merge. Os outros repositórios primeiro; o deste, que fecha a issue, por último.
+          : > "$WORK/merged.md"
+          merge_one() {
+            local repo="$1" url="$2" sha="$3" out
+            if out="$(GH_TOKEN="$token" gh pr merge "$url" "--$METHOD" --delete-branch --match-head-commit "$sha" < /dev/null 2>&1)"; then
+              commit="$(GH_TOKEN="$token" gh pr view "$url" --json mergeCommit --jq '.mergeCommit.oid // ""' < /dev/null 2>/dev/null | cut -c1-7)"
+              printf -- '- [PR em `%s`](%s) entrou na branch de destino%s\n' "$repo" "$url" "${commit:+ · commit \`$commit\`}" >> "$WORK/merged.md"
+            else
+              echo "$out"
+              if [ -s "$WORK/merged.md" ]; then
+                hold "O merge de $url falhou depois de outros já terem entrado: $(tr '\n' ' ' < "$WORK/merged.md")"
+              fi
+              hold "O merge de $url foi recusado pelo GitHub."
+            fi
+          }
+          while IFS=$'\t' read -r repo url sha; do
+            if [ "$repo" != "$REPO" ]; then merge_one "$repo" "$url" "$sha"; fi
+          done < "$WORK/prs.tsv"
+          while IFS=$'\t' read -r repo url sha; do
+            if [ "$repo" = "$REPO" ]; then merge_one "$repo" "$url" "$sha"; fi
+          done < "$WORK/prs.tsv"
+
+          echo "merged=true" >> "$GITHUB_OUTPUT"
+          note=""
+          if [ -z "${APP_TOKEN:-}" ]; then note=$'\n\n'"O merge foi feito com o token do Actions: o GitHub não dispara os workflows de push (deploy, por exemplo) nesse caso. Com o app da factory eles disparam."; fi
+          { printf '### Merge automático\n\nValidação, revisão independente e checks do pull request passaram.\n\n'; cat "$WORK/merged.md"; printf '%s\n' "$note"; } > "$WORK/merged.comment.md"
+          gh issue comment "$ISSUE" --repo "$REPO" --body-file "$WORK/merged.comment.md" >/dev/null
+          cat "$WORK/merged.md" | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Registrar a triagem
         id: triage
@@ -1131,6 +1231,7 @@ jobs:
             Validar os outros repositórios=${{ steps.validate_others.outcome }};
             Revisão independente=${{ steps.review.outcome }};
             Publicar a correção=${{ steps.publish.outcome }};
+            Merge automático=${{ steps.merge.outcome }};
             Registrar a triagem=${{ steps.triage.outcome }};
             Registrar a correção reprovada=${{ steps.rejected.outcome }}
         run: |
@@ -1176,7 +1277,7 @@ jobs:
           STEPS: >-
             policy=${{ steps.policy.outcome }} issue=${{ steps.issue.outcome }} setup=${{ steps.setup.outcome }}
             agent=${{ steps.agent.outcome }} validate=${{ steps.validate.outcome }} validate_others=${{ steps.validate_others.outcome }}
-            review=${{ steps.review.outcome }} publish=${{ steps.publish.outcome }} publish=${{ steps.triage.outcome }}
+            review=${{ steps.review.outcome }} publish=${{ steps.publish.outcome }} publish=${{ steps.merge.outcome }} publish=${{ steps.triage.outcome }}
             publish=${{ steps.rejected.outcome }} finish=${{ steps.finish.outcome }}
         run: |
           set +e

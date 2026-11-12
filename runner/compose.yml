@@ -38,28 +38,26 @@ services:
   runner1:
     <<: *runner
     environment: { <<: *env, FACTORY_RUNNER_NAME: "factory-${FACTORY_MACHINE:?defina FACTORY_MACHINE}-1" }
-    volumes: [runner1:/home/factory/runner, codex1:/home/factory/.codex, cargo:/home/factory/.cargo/registry]
+    volumes: [runner1:/home/factory/runner, codex:/home/factory/.codex, cargo:/home/factory/.cargo/registry]
   runner2:
     <<: *runner
     environment: { <<: *env, FACTORY_RUNNER_NAME: "factory-${FACTORY_MACHINE}-2" }
-    volumes: [runner2:/home/factory/runner, codex2:/home/factory/.codex, cargo:/home/factory/.cargo/registry]
+    volumes: [runner2:/home/factory/runner, codex:/home/factory/.codex, cargo:/home/factory/.cargo/registry]
   runner3:
     <<: *runner
     environment: { <<: *env, FACTORY_RUNNER_NAME: "factory-${FACTORY_MACHINE}-3" }
-    volumes: [runner3:/home/factory/runner, codex3:/home/factory/.codex, cargo:/home/factory/.cargo/registry]
+    volumes: [runner3:/home/factory/runner, codex:/home/factory/.codex, cargo:/home/factory/.cargo/registry]
   runner4:
     <<: *runner
     environment: { <<: *env, FACTORY_RUNNER_NAME: "factory-${FACTORY_MACHINE}-4" }
-    volumes: [runner4:/home/factory/runner, codex4:/home/factory/.codex, cargo:/home/factory/.cargo/registry]
+    volumes: [runner4:/home/factory/runner, codex:/home/factory/.codex, cargo:/home/factory/.cargo/registry]
 
 volumes:
   runner1:
   runner2:
   runner3:
   runner4:
-  # O login do Codex com a assinatura do ChatGPT (codex-login.sh), um por runner.
-  codex1:
-  codex2:
-  codex3:
-  codex4:
+  # O login do Codex com a assinatura do ChatGPT (setup.sh): um só, para todos os runners. O
+  # Codex trava o arquivo do login (auth.lock) ao renová-lo, então os runners não se atrapalham.
+  codex:
   cargo:

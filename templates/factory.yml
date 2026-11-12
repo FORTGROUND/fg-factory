@@ -1,0 +1,42 @@
+# Liga este repositório à factory: cada issue aberta pelo FG Tracker vira uma tentativa de
+# correção num runner `factory`. Copie para .github/workflows/factory.yml e ajuste `setup` e
+# `validate`. O disparo automático só vale com a variável do repositório FACTORY_AUTO=true;
+# sem ela, só o disparo manual (Actions → Factory → Run workflow) roda.
+name: Factory
+
+on:
+  issues:
+    types: [opened, reopened]
+  workflow_dispatch:
+    inputs:
+      issue:
+        description: Número da issue
+        required: true
+        type: number
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  fix:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (vars.FACTORY_AUTO == 'true' && github.event.issue.user.login == 'fg-tracker[bot]')
+    uses: FORTGROUND/fg-factory/.github/workflows/fix-issue.yml@v1
+    with:
+      issue: ${{ fromJSON(github.event.issue.number || inputs.issue) }}
+      # Onde roda: runners próprios com o rótulo `factory` (padrão) ou hospedado pelo GitHub.
+      # runs_on: '"ubuntu-latest"'
+      # Comandos deste repositório. `validate` precisa passar para a correção ser publicada.
+      setup: ''
+      validate: ''
+    secrets:
+      # A credencial do Claude: o token da assinatura ou a chave da API (basta uma).
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.FACTORY_CLAUDE_TOKEN }}
+      ANTHROPIC_API_KEY: ${{ secrets.FACTORY_ANTHROPIC_API_KEY }}
+      FG_TRACKER_TOKEN: ${{ secrets.FACTORY_FG_TRACKER_TOKEN }}
+      # Opcionais: o GitHub App da factory, para correções que passam por outros repositórios.
+      FACTORY_APP_ID: ${{ secrets.FACTORY_APP_ID }}
+      FACTORY_APP_PRIVATE_KEY: ${{ secrets.FACTORY_APP_PRIVATE_KEY }}

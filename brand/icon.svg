@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-label="FG Factory">
+  <rect width="512" height="512" fill="#0B0D12"/>
+  <g transform="translate(40 40) scale(6.75)">
+  <rect x="1" y="1" width="62" height="62" rx="14" fill="#12151C" stroke="#262B36" stroke-width="2"/>
+  <path d="M12 47V32L22 25.5V32L32 25.5V32H40V20H48V47Z" fill="none" stroke="#22E5C2" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M18.5 40H21.5M26.5 40H29.5M34.5 40H37.5" fill="none" stroke="#22E5C2" stroke-width="2.5" stroke-linecap="round"/>
+  <circle cx="44" cy="11" r="5.5" fill="#22E5C2" opacity=".35"/>
+  <circle cx="44" cy="11" r="2.4" fill="#22E5C2"/>
+</g>
+</svg>

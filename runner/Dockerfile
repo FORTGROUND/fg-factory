@@ -1,0 +1,41 @@
+# Runner da factory num contêiner: a mesma imagem em macOS, Linux e Windows (Docker Desktop ou
+# Docker Engine). O contêiner não monta nada do host, então não enxerga ~/.aws, chaves SSH nem
+# .env da máquina: é ele que cumpre a regra "sem credenciais de produção".
+FROM ubuntu:24.04
+
+ARG NODE_MAJOR=24
+ARG RUST_VERSION=1.99.0
+ARG PNPM_VERSION=10.34.5
+ENV DEBIAN_FRONTEND=noninteractive LANG=C.UTF-8
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates curl git jq tar unzip xz-utils sudo \
+      build-essential pkg-config libssl-dev cmake clang \
+      libicu74 libkrb5-3 zlib1g \
+ && install -d -m 0755 /etc/apt/keyrings \
+ && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /etc/apt/keyrings/githubcli.gpg \
+ && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli.gpg] https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list \
+ && curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | bash - \
+ && apt-get install -y --no-install-recommends gh nodejs \
+ && npm install -g "pnpm@${PNPM_VERSION}" @anthropic-ai/claude-code \
+ && rm -rf /var/lib/apt/lists/* /root/.npm
+
+# Usuário sem privilégios e sem sudo: o agente roda como ele.
+RUN useradd -m -s /bin/bash factory
+USER factory
+WORKDIR /home/factory
+
+# Rust na versão fixada pelos repositórios (rust-toolchain.toml baixa outra se precisar).
+ENV PATH=/home/factory/.cargo/bin:$PATH
+RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain "${RUST_VERSION}" --component rustfmt,clippy \
+ && mkdir -p /home/factory/.cargo/registry
+
+# O runner do GitHub Actions, da versão mais recente no momento do build.
+RUN set -eu; \
+    case "$(dpkg --print-architecture)" in amd64) pkg=linux-x64 ;; arm64) pkg=linux-arm64 ;; *) echo "arquitetura não suportada" >&2; exit 1 ;; esac; \
+    version="$(curl -fsSL https://api.github.com/repos/actions/runner/releases/latest | jq -r .tag_name | sed 's/^v//')"; \
+    mkdir -p runner && cd runner \
+ && curl -fsSL "https://github.com/actions/runner/releases/download/v${version}/actions-runner-${pkg}-${version}.tar.gz" | tar -xz
+
+COPY --chown=factory:factory entrypoint.sh /home/factory/entrypoint.sh
+ENTRYPOINT ["/bin/bash", "/home/factory/entrypoint.sh"]

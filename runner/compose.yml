@@ -1,0 +1,40 @@
+# Runners da factory nesta máquina. Cada serviço executa um job por vez: quantos você sobe é
+# quantas issues a máquina faz ao mesmo tempo.
+#
+#   docker compose up -d runner1            # uma issue por vez
+#   docker compose up -d runner1 runner2    # duas
+#
+# Nenhum volume do host é montado: o contêiner não vê as credenciais da máquina.
+x-runner: &runner
+  build: .
+  image: fg-factory-runner
+  restart: unless-stopped
+  init: true
+  environment: &env
+    FACTORY_ORG: ${FACTORY_ORG:?defina FACTORY_ORG}
+    FACTORY_REGISTRATION_TOKEN: ${FACTORY_REGISTRATION_TOKEN:-}
+
+services:
+  runner1:
+    <<: *runner
+    environment: { <<: *env, FACTORY_RUNNER_NAME: "factory-${FACTORY_MACHINE:?defina FACTORY_MACHINE}-1" }
+    volumes: [runner1:/home/factory/runner, cargo:/home/factory/.cargo/registry]
+  runner2:
+    <<: *runner
+    environment: { <<: *env, FACTORY_RUNNER_NAME: "factory-${FACTORY_MACHINE}-2" }
+    volumes: [runner2:/home/factory/runner, cargo:/home/factory/.cargo/registry]
+  runner3:
+    <<: *runner
+    environment: { <<: *env, FACTORY_RUNNER_NAME: "factory-${FACTORY_MACHINE}-3" }
+    volumes: [runner3:/home/factory/runner, cargo:/home/factory/.cargo/registry]
+  runner4:
+    <<: *runner
+    environment: { <<: *env, FACTORY_RUNNER_NAME: "factory-${FACTORY_MACHINE}-4" }
+    volumes: [runner4:/home/factory/runner, cargo:/home/factory/.cargo/registry]
+
+volumes:
+  runner1:
+  runner2:
+  runner3:
+  runner4:
+  cargo:

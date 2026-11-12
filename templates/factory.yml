@@ -2,11 +2,18 @@
 # correção num runner `factory`. Copie para .github/workflows/factory.yml e ajuste `setup` e
 # `validate`. O disparo automático só vale com a variável do repositório FACTORY_AUTO=true;
 # sem ela, só o disparo manual (Actions → Factory → Run workflow) roda.
+#
+# Quando a factory deixa uma issue para uma pessoa (label fg-factory:needs-human), a resposta dela
+# devolve a issue à factory: um comentário na issue, de quem tem escrita no repositório, ou a
+# resposta dada no painel do FG Tracker. Com FACTORY_AUTO desligado a resposta só tira o label e
+# devolve a issue à fila, sem abrir sessão.
 name: Factory
 
 on:
   issues:
     types: [opened, reopened]
+  issue_comment:
+    types: [created]
   workflow_dispatch:
     inputs:
       issue:
@@ -14,6 +21,11 @@ on:
         required: true
         type: number
       # Só para o disparo manual. Vazio usa o que está em `with:` mais abaixo.
+      agent:
+        description: Quem corrige - claude ou codex (configurado = o que a máquina declara)
+        type: choice
+        options: [configurado, claude, codex]
+        default: configurado
       model:
         description: Modelo do Claude Code (vazio = o configurado)
         type: string
@@ -27,6 +39,19 @@ on:
         description: Modo rápido (cobra mais por token)
         type: boolean
         default: false
+      codex_model:
+        description: Modelo do Codex (vazio = o configurado)
+        type: string
+        default: ''
+      codex_effort:
+        description: Raciocínio do Codex (vazio = o configurado)
+        type: string
+        default: ''
+      review_agent:
+        description: Quem revisa - claude ou codex (configurado = o que a máquina declara)
+        type: choice
+        options: [configurado, claude, codex]
+        default: configurado
       review_model:
         description: Revisor - modelo (vazio = o configurado)
         type: string
@@ -46,7 +71,10 @@ jobs:
   fix:
     if: >-
       github.event_name == 'workflow_dispatch' ||
-      (vars.FACTORY_AUTO == 'true' && github.event.issue.user.login == 'fg-tracker[bot]')
+      (vars.FACTORY_AUTO == 'true' && github.event_name == 'issues' && github.event.issue.user.login == 'fg-tracker[bot]') ||
+      (github.event_name == 'issue_comment' && !github.event.issue.pull_request &&
+       (contains(github.event.issue.labels.*.name, 'fg-factory:needs-human') || contains(github.event.issue.labels.*.name, 'fg-factory:ignored')) &&
+       (github.event.comment.user.type != 'Bot' || github.event.comment.user.login == 'fg-tracker[bot]'))
     uses: FORTGROUND/fg-factory/.github/workflows/fix-issue.yml@v1
     with:
       issue: ${{ fromJSON(github.event.issue.number || inputs.issue) }}
@@ -55,6 +83,15 @@ jobs:
       # Comandos deste repositório. `validate` precisa passar para a correção ser publicada.
       setup: ''
       validate: ''
+      # Uma resposta com o disparo automático desligado só devolve a issue à fila.
+      reply_only: ${{ github.event_name == 'issue_comment' && vars.FACTORY_AUTO != 'true' }}
+      # Qual CLI roda as sessões: claude ou codex. Vazio deixa cada máquina decidir (FACTORY_AGENT
+      # no .env do runner; sem isso, claude). O Codex tem o seu modelo, raciocínio e modo rápido.
+      agent: ${{ (inputs.agent != 'configurado' && inputs.agent) || '' }}
+      codex_model: ${{ inputs.codex_model || '' }}
+      codex_effort: ${{ inputs.codex_effort || '' }}
+      # codex_fast: true
+      review_agent: ${{ (inputs.review_agent != 'configurado' && inputs.review_agent) || '' }}
       # A sessão do Claude Code: modelo, raciocínio e modo rápido. O que vier do disparo manual
       # vence; depois do `||` fica o valor usado nos disparos automáticos (vazio = o padrão).
       model: ${{ inputs.model || '' }}
@@ -77,6 +114,8 @@ jobs:
       # A credencial do Claude: o token da assinatura ou a chave da API (basta uma).
       CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.FACTORY_CLAUDE_TOKEN }}
       ANTHROPIC_API_KEY: ${{ secrets.FACTORY_ANTHROPIC_API_KEY }}
+      # Só para sessões no Codex pela API. Com a assinatura do ChatGPT o login fica no runner.
+      OPENAI_API_KEY: ${{ secrets.FACTORY_OPENAI_API_KEY }}
       # O token do FG Tracker (modelo "FG Factory"): lê a telemetria e relata ao painel.
       FG_TRACKER_TOKEN: ${{ secrets.FACTORY_FG_TRACKER_TOKEN }}
       # Opcional: um token separado só para o painel (modelo "FG Factory (relatos)").

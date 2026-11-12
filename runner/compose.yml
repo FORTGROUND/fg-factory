@@ -22,28 +22,44 @@ x-runner: &runner
     CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
     ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
     FG_TRACKER_TOKEN: ${FG_TRACKER_TOKEN:-}
+    OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    # Opcional: qual CLI esta máquina usa (claude ou codex) e com que modelo, raciocínio e modo
+    # rápido (README, "Claude Code ou Codex"). O que o workflow pedir vence o que está aqui.
+    FACTORY_AGENT: ${FACTORY_AGENT:-}
+    FACTORY_REVIEW_AGENT: ${FACTORY_REVIEW_AGENT:-}
+    FACTORY_CLAUDE_MODEL: ${FACTORY_CLAUDE_MODEL:-}
+    FACTORY_CLAUDE_EFFORT: ${FACTORY_CLAUDE_EFFORT:-}
+    FACTORY_CLAUDE_FAST: ${FACTORY_CLAUDE_FAST:-}
+    FACTORY_CODEX_MODEL: ${FACTORY_CODEX_MODEL:-}
+    FACTORY_CODEX_EFFORT: ${FACTORY_CODEX_EFFORT:-}
+    FACTORY_CODEX_FAST: ${FACTORY_CODEX_FAST:-}
 
 services:
   runner1:
     <<: *runner
     environment: { <<: *env, FACTORY_RUNNER_NAME: "factory-${FACTORY_MACHINE:?defina FACTORY_MACHINE}-1" }
-    volumes: [runner1:/home/factory/runner, cargo:/home/factory/.cargo/registry]
+    volumes: [runner1:/home/factory/runner, codex1:/home/factory/.codex, cargo:/home/factory/.cargo/registry]
   runner2:
     <<: *runner
     environment: { <<: *env, FACTORY_RUNNER_NAME: "factory-${FACTORY_MACHINE}-2" }
-    volumes: [runner2:/home/factory/runner, cargo:/home/factory/.cargo/registry]
+    volumes: [runner2:/home/factory/runner, codex2:/home/factory/.codex, cargo:/home/factory/.cargo/registry]
   runner3:
     <<: *runner
     environment: { <<: *env, FACTORY_RUNNER_NAME: "factory-${FACTORY_MACHINE}-3" }
-    volumes: [runner3:/home/factory/runner, cargo:/home/factory/.cargo/registry]
+    volumes: [runner3:/home/factory/runner, codex3:/home/factory/.codex, cargo:/home/factory/.cargo/registry]
   runner4:
     <<: *runner
     environment: { <<: *env, FACTORY_RUNNER_NAME: "factory-${FACTORY_MACHINE}-4" }
-    volumes: [runner4:/home/factory/runner, cargo:/home/factory/.cargo/registry]
+    volumes: [runner4:/home/factory/runner, codex4:/home/factory/.codex, cargo:/home/factory/.cargo/registry]
 
 volumes:
   runner1:
   runner2:
   runner3:
   runner4:
+  # O login do Codex com a assinatura do ChatGPT (codex-login.sh), um por runner.
+  codex1:
+  codex2:
+  codex3:
+  codex4:
   cargo:

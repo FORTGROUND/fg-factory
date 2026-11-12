@@ -46,7 +46,8 @@ Sem `validate`, a correção é publicada sem validação do workflow. Preencha.
 
 ### 3. Dê as credenciais à factory
 
-São duas: a do Claude Code e **um** token do FG Tracker.
+São duas: a do agente de código (Claude Code, o padrão, ou Codex:
+[Claude Code ou Codex](#claude-code-ou-codex)) e **um** token do FG Tracker.
 
 O token do FG Tracker é criado no painel, em Tokens de acesso → novo token, modelo **FG Factory**:
 lê telemetria, issues e releases (para a investigação) e relata ao painel da factory. Restrinja-o
@@ -111,10 +112,10 @@ minutos entram na cota do Actions da sua conta.
 2. **A issue cabe à factory?** Precisa estar aberta, ter sido criada por um autor permitido
    (padrão: `fg-tracker[bot]`) e não ter passado do limite de tentativas (padrão: 2). No
    disparo manual o autor não é conferido.
-3. **Triagem e correção.** O Claude Code investiga com o MCP do FG Tracker (trace, logs,
+3. **Triagem e correção.** O agente (Claude Code ou Codex) investiga com o MCP do FG Tracker (trace, logs,
    releases) e decide uma de três saídas: corrigir, ignorar ou deixar para uma pessoa.
 4. **Validação.** O `validate` do repositório precisa passar.
-5. **Revisão independente.** Outra sessão do Claude Code, sem nada do que a primeira pensou,
+5. **Revisão independente.** Outra sessão, sem nada do que a primeira pensou,
    lê a issue e o diff e julga pelo código. Aprovada, a revisão vai junto no PR. Reprovada, não
    há PR: a issue fica com `fg-factory:needs-human`, o comentário diz o que foi apontado e o
    diff fica nos artefatos da execução.
@@ -137,8 +138,34 @@ Os estados de uma issue, um por vez:
 | `fg-factory:needs-human` | A factory, na triagem ou em falha | Fica para uma pessoa |
 
 Uma issue ignorada **não é fechada**: fechar resolveria a issue no FG Tracker. Enquanto tiver
-`fg-factory:ignored` ou `fg-factory:needs-human`, a factory não volta a ela; para tentar de
-novo, remova o label e dispare.
+`fg-factory:ignored` ou `fg-factory:needs-human`, a factory espera uma pessoa responder.
+
+### Responder à factory
+
+Quando a factory para numa issue (pede uma decisão, a revisão reprovou, a execução falhou ou a
+triagem ignorou), a resposta de uma pessoa devolve a issue a ela. Há dois jeitos, com o mesmo
+efeito:
+
+- **Comentar na issue do GitHub.** Vale o comentário de quem tem escrita no repositório
+  (conferido na API do GitHub). Comentário de quem não tem não faz nada.
+- **Responder no FG Tracker.** O cartão GitHub da issue, e o evento de alerta, mostram o que a
+  factory concluiu e o campo "Responder à factory". A resposta vira um comentário do app do FG
+  Tracker na issue.
+
+O que acontece depois da resposta:
+
+1. O label `fg-factory:needs-human` (ou `fg-factory:ignored`) sai e a issue passa a
+   `fg-factory:working`.
+2. A sessão recebe a conversa inteira: as conclusões anteriores da factory, como contexto, e as
+   respostas da pessoa, como **instruções**. Ela segue a mais recente. O corpo da issue continua
+   sendo dado, não instrução.
+3. O limite de tentativas (`max_attempts`) recomeça: cada resposta abre uma rodada nova.
+4. Se a resposta ainda não basta, a factory devolve para a pessoa dizendo o que falta decidir.
+
+Isso depende do gatilho `issue_comment` do `templates/factory.yml`. Com `FACTORY_AUTO` diferente
+de `true`, a resposta só tira o label e devolve a issue à fila (`fg-tracker:ready`), sem abrir
+sessão; a correção roda no próximo disparo manual. Um comentário em issue que não está esperando
+uma pessoa não dispara nada.
 
 ### O comentário é o histórico
 
@@ -312,8 +339,8 @@ runner como offline.
 
 | De onde | O quê |
 | --- | --- |
-| Workflow | Repositório, número, título e link da issue, tentativa, link da execução, nome do runner, início e fim de cada passo, resultado (`fix`, `ignore`, `needs_human` ou `failed`), passo em que parou, links dos PRs e a frase de conclusão |
-| Workflow, com `report_logs` | As linhas da saída da sessão (`session.log`), em lotes, enquanto ela roda |
+| Workflow | Repositório, número, título e link da issue, tentativa, link da execução, nome do runner, início e fim de cada passo, resultado (`fix`, `ignore`, `needs_human` ou `failed`), passo em que parou, links dos PRs, a frase de conclusão e qual CLI e modelo rodou cada sessão |
+| Workflow, com `report_logs` | O log da sessão (`session.log`), em lotes, enquanto ela roda: o que o agente escreveu e cada ferramenta que chamou, com o comando ou o arquivo |
 | Runner em contêiner | Nome do runner e da máquina, sistema, arquitetura, versão do runner, se há um job rodando, núcleos, carga, memória e disco |
 
 ### O que não é enviado
@@ -403,7 +430,51 @@ Entradas do workflow, todas opcionais, no `with:` do seu `factory.yml`:
 | `merge` | `false` | Faz o merge do PR sozinha ([Merge automático](#merge-automático)) |
 | `merge_method` | `squash` | `squash`, `merge` ou `rebase` |
 | `merge_wait_minutes` | `30` | Quanto esperar pelos checks do PR (até 45) |
+| `agent`, `review_agent` | vazio | `claude` ou `codex`; vazio deixa a máquina decidir ([Claude Code ou Codex](#claude-code-ou-codex)) |
+| `reply_only` | `false` | Só registra a resposta de uma pessoa, sem abrir sessão (o template liga com `FACTORY_AUTO` desligado) |
 | `report_logs` | `false` | Envia a saída da sessão ao painel do FG Tracker (com o segredo do painel) |
+
+### Claude Code ou Codex
+
+As sessões rodam no Claude Code (padrão) ou no Codex CLI. Quem decide, nesta ordem:
+
+1. **O workflow:** `agent: codex` (ou `claude`) no `with:` do `factory.yml`, ou o campo do disparo
+   manual. Vale para todas as máquinas, que então precisam ter a credencial desse CLI.
+2. **A máquina:** `FACTORY_AGENT=codex` no `.env` do runner. É o jeito de ter uma máquina com a
+   assinatura do ChatGPT e outra com a do Claude atendendo os mesmos repositórios.
+3. Sem nenhum dos dois, `claude`.
+
+O revisor segue a mesma ordem com `review_agent` e `FACTORY_REVIEW_AGENT`; sem eles, é o mesmo
+CLI de quem corrigiu. Dá para corrigir com um e revisar com o outro.
+
+Cada CLI tem o seu modelo, raciocínio e modo rápido, também nessa ordem (workflow, máquina,
+padrão da conta):
+
+| | No workflow | Na máquina (`.env` do runner) |
+| --- | --- | --- |
+| Claude Code | `model`, `effort`, `fast` | `FACTORY_CLAUDE_MODEL`, `FACTORY_CLAUDE_EFFORT`, `FACTORY_CLAUDE_FAST` |
+| Codex | `codex_model`, `codex_effort`, `codex_fast` | `FACTORY_CODEX_MODEL`, `FACTORY_CODEX_EFFORT`, `FACTORY_CODEX_FAST` |
+| Revisor no Claude Code | `review_model`, `review_effort`, `review_fast` | as de cima |
+| Revisor no Codex | `review_codex_model`, `review_codex_effort`, `review_codex_fast` | as de cima |
+
+- `codex_model` é o nome que `codex -m` aceita; `codex_effort`, o que o modelo aceitar (`low`,
+  `medium`, `high`, `xhigh`...); `codex_fast` liga o modo rápido do Codex (`service_tier fast`),
+  que consome mais.
+- O modo rápido ligado na máquina vale quando o workflow não o pede; o do revisor aceita `'false'`
+  para desligar.
+- O Codex roda sem confirmações e sem a sandbox dele (o contêiner do runner é a sandbox), com a
+  busca na web desligada e o mesmo MCP do FG Tracker.
+
+**Credencial do Codex**, uma das duas:
+
+- **Assinatura do ChatGPT:** `bash codex-login.sh` em `runner/` (um login por runner: `bash
+  codex-login.sh runner2`). O Codex mostra um endereço e um código para você confirmar no
+  navegador. O login fica num volume do runner e se renova sozinho.
+- **Chave da API da OpenAI:** `bash set-credentials.sh` (guarda no runner) ou o segredo
+  `FACTORY_OPENAI_API_KEY` do repositório.
+
+O comentário da issue, o resumo da execução e o painel do FG Tracker dizem qual CLI e qual modelo
+rodou cada sessão. O modelo é o que o CLI informou ao começar, não o que foi pedido.
 
 ### Modelo, raciocínio e modo rápido
 

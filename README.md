@@ -216,7 +216,7 @@ uso misto sem tirar as suas credenciais dele.
 5. Confira em Settings → Actions → Runners: `factory-<máquina>-1` aparece como *Idle*, só com
    o rótulo `factory`. Apague o token do `.env`; o registro fica no volume do contêiner.
 
-A imagem traz git, gh, jq, Node, pnpm, Rust e o Claude Code. Se o seu `validate` precisa de
+A imagem traz git, gh, jq, Node, pnpm, bun, Rust, o Claude Code e o Codex. Se o seu `validate` precisa de
 outra coisa (Python, Go, Java), acrescente ao `runner/Dockerfile` e reconstrua.
 
 | Quero | Comando (em `runner/`) |

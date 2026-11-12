@@ -35,6 +35,11 @@ ENV PATH=/home/factory/.cargo/bin:$PATH
 RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain "${RUST_VERSION}" --component rustfmt,clippy \
  && mkdir -p /home/factory/.cargo/registry /home/factory/.codex
 
+# Bun, para os repositórios que o usam (bun.lock). Fica na pasta do usuário dos jobs.
+ENV BUN_INSTALL=/home/factory/.bun
+ENV PATH=/home/factory/.bun/bin:$PATH
+RUN curl -fsSL https://bun.sh/install | bash && bun --version
+
 # O runner do GitHub Actions, da versão mais recente no momento do build.
 RUN set -eu; \
     case "$(dpkg --print-architecture)" in amd64) pkg=linux-x64 ;; arm64) pkg=linux-arm64 ;; *) echo "arquitetura não suportada" >&2; exit 1 ;; esac; \

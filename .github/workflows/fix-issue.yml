@@ -77,7 +77,7 @@ on:
         type: string
         default: ''
       report_logs:
-        description: Envia o log da sessão ao painel da factory no FG Tracker (só com FG_TRACKER_FACTORY_TOKEN)
+        description: Envia o log da sessão ao painel da factory no FG Tracker
         type: boolean
         default: false
     secrets:
@@ -90,10 +90,10 @@ on:
         description: Chave da API da Anthropic, para quem não usa o token da assinatura
         required: false
       FG_TRACKER_TOKEN:
-        description: Token do FG Tracker só de leitura (telemetria, issues, releases)
+        description: Token do FG Tracker (modelo FG Factory) - lê telemetria, issues e releases e, com a permissão de relatar, alimenta o painel da factory. Pode vir do runner em vez deste segredo
         required: false
       FG_TRACKER_FACTORY_TOKEN:
-        description: 'Token do FG Tracker só com a permissão "FG Factory: relatar" (opcional). Com ele a execução aparece no painel da factory'
+        description: 'Opcional - um token separado só para o painel, com a permissão "FG Factory: relatar". Sem ele, quem relata é o FG_TRACKER_TOKEN'
         required: false
       FACTORY_APP_ID:
         description: Id do GitHub App da factory (opcional). Com ele a factory lê e abre PRs em outros repositórios da organização
@@ -121,21 +121,31 @@ jobs:
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
       # Com o app da factory a issue pode ser resolvida em mais de um repositório.
       HAS_APP: ${{ secrets.FACTORY_APP_ID != '' && secrets.FACTORY_APP_PRIVATE_KEY != '' }}
-      # Painel da factory no FG Tracker (README, "Painel no FG Tracker"). Aqui fica só se há token:
-      # o valor entra apenas no ambiente dos passos "Painel", nunca no do agente nem no dos
-      # comandos do repositório (setup e validate).
-      REPORT: ${{ secrets.FG_TRACKER_FACTORY_TOKEN != '' }}
       TRACKER_URL: ${{ inputs.tracker_url }}
     steps:
-      - name: Segredos da factory presentes
+      - name: Credenciais da factory presentes
         env:
           HAS_CLAUDE: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' || secrets.ANTHROPIC_API_KEY != '' }}
           HAS_TRACKER: ${{ secrets.FG_TRACKER_TOKEN != '' }}
+          HAS_PANEL: ${{ secrets.FG_TRACKER_FACTORY_TOKEN != '' }}
         run: |
-          if [ "$HAS_CLAUDE" != "true" ] || [ "$HAS_TRACKER" != "true" ]; then
-            echo "::error title=Faltam segredos::Grave FACTORY_CLAUDE_TOKEN (ou FACTORY_ANTHROPIC_API_KEY) e FACTORY_FG_TRACKER_TOKEN neste repositório (README do fg-factory, passo 3)."
+          # Cada credencial vem do segredo do repositório ou, na falta dele, do arquivo que o
+          # runner guarda (README, "Credenciais no runner"). O segredo do repositório sempre vence.
+          FACTORY_CREDENTIALS="$HOME/.fg-factory/credentials"
+          echo "FACTORY_CREDENTIALS=$FACTORY_CREDENTIALS" >> "$GITHUB_ENV"
+          stored() { [ -r "$FACTORY_CREDENTIALS" ] && grep -q "^$1=." "$FACTORY_CREDENTIALS"; }
+          if [ "$HAS_CLAUDE" != "true" ] && ! stored CLAUDE_CODE_OAUTH_TOKEN && ! stored ANTHROPIC_API_KEY; then
+            echo "::error title=Falta a credencial do Claude::Grave FACTORY_CLAUDE_TOKEN (ou FACTORY_ANTHROPIC_API_KEY) neste repositório, ou guarde a credencial no runner (README do fg-factory, Credenciais)."
             exit 1
           fi
+          if [ "$HAS_TRACKER" != "true" ] && ! stored FG_TRACKER_TOKEN; then
+            echo "::error title=Falta o token do FG Tracker::Grave FACTORY_FG_TRACKER_TOKEN neste repositório, ou guarde o token no runner (README do fg-factory, Credenciais)."
+            exit 1
+          fi
+          # Painel do FG Tracker: o token próprio do painel ou, sem ele, o mesmo token do FG Tracker
+          # (basta ter a permissão "FG Factory: relatar"). Um token sem ela desliga os relatos no
+          # primeiro envio recusado.
+          echo "REPORT=true" >> "$GITHUB_ENV"
 
       - name: Máquina sem credenciais de produção
         id: policy
@@ -232,6 +242,7 @@ jobs:
         continue-on-error: true
         env:
           FG_TRACKER_FACTORY_TOKEN: ${{ secrets.FG_TRACKER_FACTORY_TOKEN }}
+          FG_TRACKER_TOKEN: ${{ secrets.FG_TRACKER_TOKEN }}
           WORK: ${{ steps.issue.outputs.work }}
           T_POLICY: ${{ steps.policy.outputs.started }}
           T_ISSUE: ${{ steps.issue.outputs.started }}
@@ -242,6 +253,11 @@ jobs:
           HAS_SETUP: ${{ inputs.setup != '' }}
         run: |
           set +e
+          FG_TRACKER_FACTORY_TOKEN="${FG_TRACKER_FACTORY_TOKEN:-${FG_TRACKER_TOKEN:-}}"
+          if [ -z "$FG_TRACKER_FACTORY_TOKEN" ] && [ -r "$FACTORY_CREDENTIALS" ]; then
+            FG_TRACKER_FACTORY_TOKEN="$(sed -n 's/^FG_TRACKER_TOKEN=//p' "$FACTORY_CREDENTIALS" | head -1)"
+          fi
+          unset FG_TRACKER_TOKEN
           # Relata ao painel do FG Tracker. Lê os eventos (JSON) da entrada. O token vai num
           # descritor de arquivo, fora dos argumentos do curl. Nunca falha nem segura o job.
           report() {
@@ -251,7 +267,13 @@ jobs:
             [ "$(jq '.events | length' <<< "$body")" -gt 0 ] || return 0
             code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 3 --max-time 8 -X POST "${TRACKER_URL%/}/v1/factory/events" \
               -H 'content-type: application/json' -H @/dev/fd/3 --data-binary @- <<< "$body" 3<<< "Authorization: Bearer $FG_TRACKER_FACTORY_TOKEN" 2>/dev/null)"
-            if [ "$code" != "200" ]; then echo "::notice title=Painel do FG Tracker::Relato não enviado (HTTP ${code:-sem resposta}). A execução segue normalmente."; fi
+            case "$code" in
+              200) ;;
+              401|403)
+                echo "::notice title=Painel do FG Tracker::O token não pode relatar ao painel (HTTP $code): precisa da permissão FG Factory: relatar e de estar restrito a uma organização. Os relatos ficam desligados nesta execução; ela segue normalmente."
+                echo "REPORT=false" >> "$GITHUB_ENV" ;;
+              *) echo "::notice title=Painel do FG Tracker::Relato não enviado (HTTP ${code:-sem resposta}). A execução segue normalmente." ;;
+            esac
             return 0
           }
           # O resultado de um passo do Actions como o painel o entende; vazio = o passo não rodou.
@@ -302,11 +324,17 @@ jobs:
         continue-on-error: true
         env:
           FG_TRACKER_FACTORY_TOKEN: ${{ secrets.FG_TRACKER_FACTORY_TOKEN }}
+          FG_TRACKER_TOKEN: ${{ secrets.FG_TRACKER_TOKEN }}
           WORK: ${{ steps.issue.outputs.work }}
           S_SETUP: ${{ steps.setup.outcome }}
           REPORT_LOGS: ${{ inputs.report_logs }}
         run: |
           set +e
+          FG_TRACKER_FACTORY_TOKEN="${FG_TRACKER_FACTORY_TOKEN:-${FG_TRACKER_TOKEN:-}}"
+          if [ -z "$FG_TRACKER_FACTORY_TOKEN" ] && [ -r "$FACTORY_CREDENTIALS" ]; then
+            FG_TRACKER_FACTORY_TOKEN="$(sed -n 's/^FG_TRACKER_TOKEN=//p' "$FACTORY_CREDENTIALS" | head -1)"
+          fi
+          unset FG_TRACKER_TOKEN
           # Relata ao painel do FG Tracker. Lê os eventos (JSON) da entrada. O token vai num
           # descritor de arquivo, fora dos argumentos do curl. Nunca falha nem segura o job.
           report() {
@@ -316,7 +344,13 @@ jobs:
             [ "$(jq '.events | length' <<< "$body")" -gt 0 ] || return 0
             code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 3 --max-time 8 -X POST "${TRACKER_URL%/}/v1/factory/events" \
               -H 'content-type: application/json' -H @/dev/fd/3 --data-binary @- <<< "$body" 3<<< "Authorization: Bearer $FG_TRACKER_FACTORY_TOKEN" 2>/dev/null)"
-            if [ "$code" != "200" ]; then echo "::notice title=Painel do FG Tracker::Relato não enviado (HTTP ${code:-sem resposta}). A execução segue normalmente."; fi
+            case "$code" in
+              200) ;;
+              401|403)
+                echo "::notice title=Painel do FG Tracker::O token não pode relatar ao painel (HTTP $code): precisa da permissão FG Factory: relatar e de estar restrito a uma organização. Os relatos ficam desligados nesta execução; ela segue normalmente."
+                echo "REPORT=false" >> "$GITHUB_ENV" ;;
+              *) echo "::notice title=Painel do FG Tracker::Relato não enviado (HTTP ${code:-sem resposta}). A execução segue normalmente." ;;
+            esac
             return 0
           }
           # O resultado de um passo do Actions como o painel o entende; vazio = o passo não rodou.
@@ -377,6 +411,16 @@ jobs:
           # Só a credencial do Claude que foi gravada fica no ambiente.
           if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then unset CLAUDE_CODE_OAUTH_TOKEN; fi
           if [ -z "${ANTHROPIC_API_KEY:-}" ]; then unset ANTHROPIC_API_KEY; fi
+          # Sem segredo no repositório, vale o que o runner guarda. O valor é mascarado no log.
+          stored() { sed -n "s/^$1=//p" "$FACTORY_CREDENTIALS" 2>/dev/null | head -1; }
+          if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+            value="$(stored CLAUDE_CODE_OAUTH_TOKEN)"; if [ -n "$value" ]; then echo "::add-mask::$value"; export CLAUDE_CODE_OAUTH_TOKEN="$value"; fi
+            value="$(stored ANTHROPIC_API_KEY)"; if [ -n "$value" ]; then echo "::add-mask::$value"; export ANTHROPIC_API_KEY="$value"; fi
+          fi
+          if [ -z "${FG_TRACKER_TOKEN:-}" ]; then
+            FG_TRACKER_TOKEN="$(stored FG_TRACKER_TOKEN)"; if [ -n "$FG_TRACKER_TOKEN" ]; then echo "::add-mask::$FG_TRACKER_TOKEN"; fi
+          fi
+          unset value
           jq '{number, title, body, labels: [.labels[].name], created_at, html_url}' "$WORK/issue.json" > "$WORK/issue.public.json"
           (umask 077; jq -n --arg url "$FG_TRACKER_URL" --arg token "$FG_TRACKER_TOKEN" \
             '{mcpServers: {"fg-tracker": {command: "npx", args: ["-y", "fg-tracker-mcp@0.49.1"], env: {FG_TRACKER_URL: $url, FG_TRACKER_TOKEN: $token}}}}' > "$WORK/mcp.json")
@@ -488,12 +532,18 @@ jobs:
         continue-on-error: true
         env:
           FG_TRACKER_FACTORY_TOKEN: ${{ secrets.FG_TRACKER_FACTORY_TOKEN }}
+          FG_TRACKER_TOKEN: ${{ secrets.FG_TRACKER_TOKEN }}
           WORK: ${{ steps.issue.outputs.work }}
           S_AGENT: ${{ steps.agent.outcome }}
           DECISION: ${{ steps.agent.outputs.decision }}
           HAS_VALIDATE: ${{ inputs.validate != '' }}
         run: |
           set +e
+          FG_TRACKER_FACTORY_TOKEN="${FG_TRACKER_FACTORY_TOKEN:-${FG_TRACKER_TOKEN:-}}"
+          if [ -z "$FG_TRACKER_FACTORY_TOKEN" ] && [ -r "$FACTORY_CREDENTIALS" ]; then
+            FG_TRACKER_FACTORY_TOKEN="$(sed -n 's/^FG_TRACKER_TOKEN=//p' "$FACTORY_CREDENTIALS" | head -1)"
+          fi
+          unset FG_TRACKER_TOKEN
           # Relata ao painel do FG Tracker. Lê os eventos (JSON) da entrada. O token vai num
           # descritor de arquivo, fora dos argumentos do curl. Nunca falha nem segura o job.
           report() {
@@ -503,7 +553,13 @@ jobs:
             [ "$(jq '.events | length' <<< "$body")" -gt 0 ] || return 0
             code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 3 --max-time 8 -X POST "${TRACKER_URL%/}/v1/factory/events" \
               -H 'content-type: application/json' -H @/dev/fd/3 --data-binary @- <<< "$body" 3<<< "Authorization: Bearer $FG_TRACKER_FACTORY_TOKEN" 2>/dev/null)"
-            if [ "$code" != "200" ]; then echo "::notice title=Painel do FG Tracker::Relato não enviado (HTTP ${code:-sem resposta}). A execução segue normalmente."; fi
+            case "$code" in
+              200) ;;
+              401|403)
+                echo "::notice title=Painel do FG Tracker::O token não pode relatar ao painel (HTTP $code): precisa da permissão FG Factory: relatar e de estar restrito a uma organização. Os relatos ficam desligados nesta execução; ela segue normalmente."
+                echo "REPORT=false" >> "$GITHUB_ENV" ;;
+              *) echo "::notice title=Painel do FG Tracker::Relato não enviado (HTTP ${code:-sem resposta}). A execução segue normalmente." ;;
+            esac
             return 0
           }
           # O resultado de um passo do Actions como o painel o entende; vazio = o passo não rodou.
@@ -589,9 +645,15 @@ jobs:
         continue-on-error: true
         env:
           FG_TRACKER_FACTORY_TOKEN: ${{ secrets.FG_TRACKER_FACTORY_TOKEN }}
+          FG_TRACKER_TOKEN: ${{ secrets.FG_TRACKER_TOKEN }}
           S_VALIDATE: ${{ steps.validate.outcome }}
         run: |
           set +e
+          FG_TRACKER_FACTORY_TOKEN="${FG_TRACKER_FACTORY_TOKEN:-${FG_TRACKER_TOKEN:-}}"
+          if [ -z "$FG_TRACKER_FACTORY_TOKEN" ] && [ -r "$FACTORY_CREDENTIALS" ]; then
+            FG_TRACKER_FACTORY_TOKEN="$(sed -n 's/^FG_TRACKER_TOKEN=//p' "$FACTORY_CREDENTIALS" | head -1)"
+          fi
+          unset FG_TRACKER_TOKEN
           # Relata ao painel do FG Tracker. Lê os eventos (JSON) da entrada. O token vai num
           # descritor de arquivo, fora dos argumentos do curl. Nunca falha nem segura o job.
           report() {
@@ -601,7 +663,13 @@ jobs:
             [ "$(jq '.events | length' <<< "$body")" -gt 0 ] || return 0
             code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 3 --max-time 8 -X POST "${TRACKER_URL%/}/v1/factory/events" \
               -H 'content-type: application/json' -H @/dev/fd/3 --data-binary @- <<< "$body" 3<<< "Authorization: Bearer $FG_TRACKER_FACTORY_TOKEN" 2>/dev/null)"
-            if [ "$code" != "200" ]; then echo "::notice title=Painel do FG Tracker::Relato não enviado (HTTP ${code:-sem resposta}). A execução segue normalmente."; fi
+            case "$code" in
+              200) ;;
+              401|403)
+                echo "::notice title=Painel do FG Tracker::O token não pode relatar ao painel (HTTP $code): precisa da permissão FG Factory: relatar e de estar restrito a uma organização. Os relatos ficam desligados nesta execução; ela segue normalmente."
+                echo "REPORT=false" >> "$GITHUB_ENV" ;;
+              *) echo "::notice title=Painel do FG Tracker::Relato não enviado (HTTP ${code:-sem resposta}). A execução segue normalmente." ;;
+            esac
             return 0
           }
           # O resultado de um passo do Actions como o painel o entende; vazio = o passo não rodou.
@@ -646,10 +714,16 @@ jobs:
         continue-on-error: true
         env:
           FG_TRACKER_FACTORY_TOKEN: ${{ secrets.FG_TRACKER_FACTORY_TOKEN }}
+          FG_TRACKER_TOKEN: ${{ secrets.FG_TRACKER_TOKEN }}
           S_OTHERS: ${{ steps.validate_others.outcome }}
           REVIEW: ${{ inputs.review }}
         run: |
           set +e
+          FG_TRACKER_FACTORY_TOKEN="${FG_TRACKER_FACTORY_TOKEN:-${FG_TRACKER_TOKEN:-}}"
+          if [ -z "$FG_TRACKER_FACTORY_TOKEN" ] && [ -r "$FACTORY_CREDENTIALS" ]; then
+            FG_TRACKER_FACTORY_TOKEN="$(sed -n 's/^FG_TRACKER_TOKEN=//p' "$FACTORY_CREDENTIALS" | head -1)"
+          fi
+          unset FG_TRACKER_TOKEN
           # Relata ao painel do FG Tracker. Lê os eventos (JSON) da entrada. O token vai num
           # descritor de arquivo, fora dos argumentos do curl. Nunca falha nem segura o job.
           report() {
@@ -659,7 +733,13 @@ jobs:
             [ "$(jq '.events | length' <<< "$body")" -gt 0 ] || return 0
             code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 3 --max-time 8 -X POST "${TRACKER_URL%/}/v1/factory/events" \
               -H 'content-type: application/json' -H @/dev/fd/3 --data-binary @- <<< "$body" 3<<< "Authorization: Bearer $FG_TRACKER_FACTORY_TOKEN" 2>/dev/null)"
-            if [ "$code" != "200" ]; then echo "::notice title=Painel do FG Tracker::Relato não enviado (HTTP ${code:-sem resposta}). A execução segue normalmente."; fi
+            case "$code" in
+              200) ;;
+              401|403)
+                echo "::notice title=Painel do FG Tracker::O token não pode relatar ao painel (HTTP $code): precisa da permissão FG Factory: relatar e de estar restrito a uma organização. Os relatos ficam desligados nesta execução; ela segue normalmente."
+                echo "REPORT=false" >> "$GITHUB_ENV" ;;
+              *) echo "::notice title=Painel do FG Tracker::Relato não enviado (HTTP ${code:-sem resposta}). A execução segue normalmente." ;;
+            esac
             return 0
           }
           # O resultado de um passo do Actions como o painel o entende; vazio = o passo não rodou.
@@ -690,6 +770,12 @@ jobs:
           set -euo pipefail
           if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then unset CLAUDE_CODE_OAUTH_TOKEN; fi
           if [ -z "${ANTHROPIC_API_KEY:-}" ]; then unset ANTHROPIC_API_KEY; fi
+          stored() { sed -n "s/^$1=//p" "$FACTORY_CREDENTIALS" 2>/dev/null | head -1; }
+          if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+            value="$(stored CLAUDE_CODE_OAUTH_TOKEN)"; if [ -n "$value" ]; then echo "::add-mask::$value"; export CLAUDE_CODE_OAUTH_TOKEN="$value"; fi
+            value="$(stored ANTHROPIC_API_KEY)"; if [ -n "$value" ]; then echo "::add-mask::$value"; export ANTHROPIC_API_KEY="$value"; fi
+          fi
+          unset value
           rev="$WORK/review"; rm -rf "$rev" && mkdir -p "$rev"
 
           # O que mudou, por repositório. `add -N` faz os arquivos novos entrarem no diff.
@@ -806,9 +892,15 @@ jobs:
         continue-on-error: true
         env:
           FG_TRACKER_FACTORY_TOKEN: ${{ secrets.FG_TRACKER_FACTORY_TOKEN }}
+          FG_TRACKER_TOKEN: ${{ secrets.FG_TRACKER_TOKEN }}
           S_REVIEW: ${{ steps.review.outcome }}
         run: |
           set +e
+          FG_TRACKER_FACTORY_TOKEN="${FG_TRACKER_FACTORY_TOKEN:-${FG_TRACKER_TOKEN:-}}"
+          if [ -z "$FG_TRACKER_FACTORY_TOKEN" ] && [ -r "$FACTORY_CREDENTIALS" ]; then
+            FG_TRACKER_FACTORY_TOKEN="$(sed -n 's/^FG_TRACKER_TOKEN=//p' "$FACTORY_CREDENTIALS" | head -1)"
+          fi
+          unset FG_TRACKER_TOKEN
           # Relata ao painel do FG Tracker. Lê os eventos (JSON) da entrada. O token vai num
           # descritor de arquivo, fora dos argumentos do curl. Nunca falha nem segura o job.
           report() {
@@ -818,7 +910,13 @@ jobs:
             [ "$(jq '.events | length' <<< "$body")" -gt 0 ] || return 0
             code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 3 --max-time 8 -X POST "${TRACKER_URL%/}/v1/factory/events" \
               -H 'content-type: application/json' -H @/dev/fd/3 --data-binary @- <<< "$body" 3<<< "Authorization: Bearer $FG_TRACKER_FACTORY_TOKEN" 2>/dev/null)"
-            if [ "$code" != "200" ]; then echo "::notice title=Painel do FG Tracker::Relato não enviado (HTTP ${code:-sem resposta}). A execução segue normalmente."; fi
+            case "$code" in
+              200) ;;
+              401|403)
+                echo "::notice title=Painel do FG Tracker::O token não pode relatar ao painel (HTTP $code): precisa da permissão FG Factory: relatar e de estar restrito a uma organização. Os relatos ficam desligados nesta execução; ela segue normalmente."
+                echo "REPORT=false" >> "$GITHUB_ENV" ;;
+              *) echo "::notice title=Painel do FG Tracker::Relato não enviado (HTTP ${code:-sem resposta}). A execução segue normalmente." ;;
+            esac
             return 0
           }
           # O resultado de um passo do Actions como o painel o entende; vazio = o passo não rodou.
@@ -967,6 +1065,7 @@ jobs:
         continue-on-error: true
         env:
           FG_TRACKER_FACTORY_TOKEN: ${{ secrets.FG_TRACKER_FACTORY_TOKEN }}
+          FG_TRACKER_TOKEN: ${{ secrets.FG_TRACKER_TOKEN }}
           WORK: ${{ steps.issue.outputs.work }}
           S_PUBLISH: ${{ steps.publish.outcome }}
           S_TRIAGE: ${{ steps.triage.outcome }}
@@ -974,6 +1073,11 @@ jobs:
           GO: ${{ steps.issue.outputs.go }}
         run: |
           set +e
+          FG_TRACKER_FACTORY_TOKEN="${FG_TRACKER_FACTORY_TOKEN:-${FG_TRACKER_TOKEN:-}}"
+          if [ -z "$FG_TRACKER_FACTORY_TOKEN" ] && [ -r "$FACTORY_CREDENTIALS" ]; then
+            FG_TRACKER_FACTORY_TOKEN="$(sed -n 's/^FG_TRACKER_TOKEN=//p' "$FACTORY_CREDENTIALS" | head -1)"
+          fi
+          unset FG_TRACKER_TOKEN
           # Relata ao painel do FG Tracker. Lê os eventos (JSON) da entrada. O token vai num
           # descritor de arquivo, fora dos argumentos do curl. Nunca falha nem segura o job.
           report() {
@@ -983,7 +1087,13 @@ jobs:
             [ "$(jq '.events | length' <<< "$body")" -gt 0 ] || return 0
             code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 3 --max-time 8 -X POST "${TRACKER_URL%/}/v1/factory/events" \
               -H 'content-type: application/json' -H @/dev/fd/3 --data-binary @- <<< "$body" 3<<< "Authorization: Bearer $FG_TRACKER_FACTORY_TOKEN" 2>/dev/null)"
-            if [ "$code" != "200" ]; then echo "::notice title=Painel do FG Tracker::Relato não enviado (HTTP ${code:-sem resposta}). A execução segue normalmente."; fi
+            case "$code" in
+              200) ;;
+              401|403)
+                echo "::notice title=Painel do FG Tracker::O token não pode relatar ao painel (HTTP $code): precisa da permissão FG Factory: relatar e de estar restrito a uma organização. Os relatos ficam desligados nesta execução; ela segue normalmente."
+                echo "REPORT=false" >> "$GITHUB_ENV" ;;
+              *) echo "::notice title=Painel do FG Tracker::Relato não enviado (HTTP ${code:-sem resposta}). A execução segue normalmente." ;;
+            esac
             return 0
           }
           # O resultado de um passo do Actions como o painel o entende; vazio = o passo não rodou.
@@ -1056,6 +1166,7 @@ jobs:
         continue-on-error: true
         env:
           FG_TRACKER_FACTORY_TOKEN: ${{ secrets.FG_TRACKER_FACTORY_TOKEN }}
+          FG_TRACKER_TOKEN: ${{ secrets.FG_TRACKER_TOKEN }}
           JOB: ${{ job.status }}
           DECISION: ${{ steps.agent.outputs.decision }}
           VERDICT: ${{ steps.review.outputs.verdict }}
@@ -1069,6 +1180,11 @@ jobs:
             publish=${{ steps.rejected.outcome }} finish=${{ steps.finish.outcome }}
         run: |
           set +e
+          FG_TRACKER_FACTORY_TOKEN="${FG_TRACKER_FACTORY_TOKEN:-${FG_TRACKER_TOKEN:-}}"
+          if [ -z "$FG_TRACKER_FACTORY_TOKEN" ] && [ -r "$FACTORY_CREDENTIALS" ]; then
+            FG_TRACKER_FACTORY_TOKEN="$(sed -n 's/^FG_TRACKER_TOKEN=//p' "$FACTORY_CREDENTIALS" | head -1)"
+          fi
+          unset FG_TRACKER_TOKEN
           # Relata ao painel do FG Tracker. Lê os eventos (JSON) da entrada. O token vai num
           # descritor de arquivo, fora dos argumentos do curl. Nunca falha nem segura o job.
           report() {
@@ -1078,7 +1194,13 @@ jobs:
             [ "$(jq '.events | length' <<< "$body")" -gt 0 ] || return 0
             code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 3 --max-time 8 -X POST "${TRACKER_URL%/}/v1/factory/events" \
               -H 'content-type: application/json' -H @/dev/fd/3 --data-binary @- <<< "$body" 3<<< "Authorization: Bearer $FG_TRACKER_FACTORY_TOKEN" 2>/dev/null)"
-            if [ "$code" != "200" ]; then echo "::notice title=Painel do FG Tracker::Relato não enviado (HTTP ${code:-sem resposta}). A execução segue normalmente."; fi
+            case "$code" in
+              200) ;;
+              401|403)
+                echo "::notice title=Painel do FG Tracker::O token não pode relatar ao painel (HTTP $code): precisa da permissão FG Factory: relatar e de estar restrito a uma organização. Os relatos ficam desligados nesta execução; ela segue normalmente."
+                echo "REPORT=false" >> "$GITHUB_ENV" ;;
+              *) echo "::notice title=Painel do FG Tracker::Relato não enviado (HTTP ${code:-sem resposta}). A execução segue normalmente." ;;
+            esac
             return 0
           }
           # O resultado de um passo do Actions como o painel o entende; vazio = o passo não rodou.

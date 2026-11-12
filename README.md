@@ -44,24 +44,44 @@ seu repositório e preencha dois comandos:
 
 Sem `validate`, a correção é publicada sem validação do workflow. Preencha.
 
-### 3. Grave os segredos do repositório
+### 3. Dê as credenciais à factory
+
+São duas: a do Claude Code e **um** token do FG Tracker.
+
+O token do FG Tracker é criado no painel, em Tokens de acesso → novo token, modelo **FG Factory**:
+lê telemetria, issues e releases (para a investigação) e relata ao painel da factory. Restrinja-o
+a **uma organização**; sem isso o FG Tracker recusa os relatos.
+
+Elas podem ficar em dois lugares. Escolha um:
+
+**No runner (uma vez para todos os repositórios).** Para runners próprios em contêiner. Em
+`runner/`, depois de criar o `.env` (passo 4):
+
+```sh
+bash set-credentials.sh
+```
+
+O script pergunta os dois valores sem mostrá-los e os grava no `.env` da máquina. Todo
+repositório atendido por esses runners passa a funcionar só com o `factory.yml`, sem segredos.
+Veja [Credenciais no runner](#credenciais-no-runner) antes de escolher.
+
+**Em cada repositório (segredos do GitHub).** O caminho para o runner hospedado pelo GitHub, e
+para quem prefere credenciais diferentes por repositório:
 
 | Segredo | Valor |
 | --- | --- |
 | `FACTORY_CLAUDE_TOKEN` | O token que `claude setup-token` imprime, numa máquina logada |
 | `FACTORY_ANTHROPIC_API_KEY` | Alternativa ao de cima: a chave da API da Anthropic |
-| `FACTORY_FG_TRACKER_TOKEN` | Um token de acesso do FG Tracker **só de leitura** (Telemetria, Issues, Releases, Alertas: ler) |
-
-Pelo script, que lê os valores sem mostrar na tela:
+| `FACTORY_FG_TRACKER_TOKEN` | O token do FG Tracker do modelo **FG Factory** |
 
 ```sh
 bash scripts/set-secrets.sh minha-org/meu-repo
 ```
 
-Ou à mão, em Settings → Secrets and variables → Actions do repositório.
+Ou à mão, em Settings → Secrets and variables → Actions. Um segredo de organização serve a
+todos os repositórios de uma vez, mas em repositório privado isso exige plano pago do GitHub.
 
-O token do FG Tracker é criado no painel, em Tokens de acesso. Não use um token com escrita:
-o agente lê texto que vem de tráfego externo.
+Quando os dois existem, o segredo do repositório vence o que está no runner.
 
 ### 4. Escolha onde roda
 
@@ -257,47 +277,34 @@ quais estão trabalhando, livres ou offline, em que issue e em que passo cada ex
 resultado de cada uma, os PRs e gráficos do período. O item aparece no menu da organização
 depois do primeiro relato, para owners e admins dela.
 
-### 1. Crie o token do painel
+### O token
 
-No FG Tracker, em Tokens de acesso → novo token, modelo **FG Factory (relatos)**:
+O mesmo token do FG Tracker do passo 3 (modelo **FG Factory**) já relata ao painel: não há
+nada a mais para gravar. Ele precisa da permissão **FG Factory: relatar**, estar restrito a
+**uma organização** (é ela que recebe os relatos) e ter sido criado por um owner ou admin dela.
 
-- só a permissão **FG Factory: relatar**. Ela não lê nada, nem o próprio painel;
-- **restrito a uma organização**: é ela que recebe os relatos. Sem essa restrição o FG Tracker
-  recusa os relatos;
-- quem cria precisa ser owner ou admin da organização.
+Um token só de leitura continua servindo para a factory trabalhar; o painel só fica vazio. O
+primeiro relato recusado aparece como aviso na execução, e os seguintes nem são tentados.
 
-É um token diferente do `FACTORY_FG_TRACKER_TOKEN` (o de leitura, que o agente usa). Não use um
-no lugar do outro.
+Quer manter a permissão de relatar longe da sessão que lê a issue? Crie um segundo token pelo
+modelo **FG Factory (relatos)**, que não lê nada, e grave-o como `FACTORY_FG_TRACKER_PANEL_TOKEN`
+no repositório (ou `FG_TRACKER_FACTORY_TOKEN` no `.env` do runner). Quando existe, é ele que
+relata, e o token de leitura pode voltar a ser só de leitura.
 
-### 2. Execuções: um segredo no repositório
+### Execuções
 
-Grave o token como `FACTORY_FG_TRACKER_PANEL_TOKEN` (o `scripts/set-secrets.sh` pergunta por ele)
-e confira que o seu `factory.yml` o repassa, como no [template](templates/factory.yml):
-
-```yaml
-    secrets:
-      FG_TRACKER_FACTORY_TOKEN: ${{ secrets.FACTORY_FG_TRACKER_PANEL_TOKEN }}
-```
-
-A partir daí cada execução relata o começo, o início e o fim de cada passo e o resultado. Sem o
-segredo nada muda: nenhum passo do painel roda.
-
-Para ver também a saída da sessão do Claude Code enquanto ela roda, ligue no `with:`:
+Cada execução relata o começo, o início e o fim de cada passo e o resultado. Para ver também a
+saída da sessão do Claude Code enquanto ela roda, ligue no `with:` do `factory.yml`:
 
 ```yaml
       report_logs: true
 ```
 
-### 3. Runners: o token no `.env` da máquina
+### Runners
 
-Só para runners em contêiner. Em `runner/.env`:
-
-```sh
-FG_TRACKER_FACTORY_TOKEN=fgt_...
-```
-
-e suba de novo (`docker compose up -d --build runner1`). Cada runner passa a enviar um sinal a
-cada 30 segundos. Sem sinal por 2 minutos, o painel mostra o runner como offline.
+Só para runners em contêiner: com o token no `.env` da máquina (`bash set-credentials.sh`),
+cada runner envia um sinal a cada 30 segundos. Sem sinal por 2 minutos, o painel mostra o
+runner como offline.
 
 ### O que é enviado
 
@@ -345,10 +352,11 @@ há porcentagem nem previsão de término: o passo de triagem e correção leva 
   tráfego externo; o agente é instruído a nunca obedecer comandos que apareçam ali.
 - **O agente não publica.** O checkout não guarda credencial. Quem faz commit, push e PR é o
   workflow, depois da validação.
-- **Leitura só.** O token do FG Tracker é de leitura; a credencial do GitHub ao alcance do
-  agente, quando existe, é de leitura de código.
-- **O token do painel não lê nada.** Ele só envia relatos da factory e fica fora do ambiente do
-  agente ([Painel no FG Tracker](#painel-no-fg-tracker)).
+- **O token do FG Tracker não altera nada.** O modelo FG Factory lê e relata ao painel da
+  factory; o pior que uma sessão enganada faz com ele é enviar um relato falso ao painel. A
+  credencial do GitHub ao alcance do agente, quando existe, é de leitura de código.
+- **Quer separar?** Um token só de leitura para a sessão e outro, que não lê nada, para o
+  painel ([Painel no FG Tracker](#painel-no-fg-tracker)).
 - **Limites por execução.** Mudanças em `.github/workflows` ou acima de 30 arquivos não são
   publicadas sozinhas. Duas tentativas por issue, depois fica para uma pessoa.
 - **Use em repositórios privados** quando tiver runners próprios: o GitHub não recomenda
@@ -356,6 +364,21 @@ há porcentagem nem previsão de término: o passo de triagem e correção leva 
 
 Limite conhecido: num runner próprio, o registro do runner fica na máquina e o agente roda
 como o mesmo usuário. Trate a máquina como algo que pode ser comprometido: nada de produção nela.
+
+### Credenciais no runner
+
+Guardar a credencial do Claude e o token do FG Tracker no runner tira os segredos de cada
+repositório. O que muda:
+
+- Ficam num arquivo que só o usuário dos jobs lê, dentro do contêiner; não vão para o ambiente
+  do runner nem para o log (o workflow mascara os valores).
+- Todo job que roda naquele runner alcança o arquivo, inclusive o `setup` e o `validate` de
+  qualquer repositório atendido. Com segredos por repositório isso também vale durante a
+  execução da factory, mas só para o repositório que os gravou.
+- Por isso: registre o runner só com o rótulo `factory` (é o padrão), use-o só em repositórios
+  privados da sua organização e não deixe workflows de terceiros rodarem nele.
+- Trocar ou tirar: `bash set-credentials.sh` de novo, ou apague as linhas do `.env` e suba os
+  runners outra vez.
 
 ## Ajustes
 

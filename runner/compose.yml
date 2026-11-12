@@ -17,6 +17,11 @@ x-runner: &runner
     # Opcional: o sinal do runner para o painel da factory no FG Tracker (README).
     FG_TRACKER_FACTORY_TOKEN: ${FG_TRACKER_FACTORY_TOKEN:-}
     FG_TRACKER_URL: ${FG_TRACKER_URL:-https://tracker-api.fortground.com.br}
+    # Opcional: credenciais guardadas no runner, para os repositórios não precisarem de segredos
+    # (README, "Credenciais no runner"). O token do FG Tracker também serve ao painel.
+    CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
+    ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    FG_TRACKER_TOKEN: ${FG_TRACKER_TOKEN:-}
 
 services:
   runner1:

@@ -13,6 +13,20 @@ on:
         description: Número da issue
         required: true
         type: number
+      # Só para o disparo manual. Vazio usa o que está em `with:` mais abaixo.
+      model:
+        description: Modelo do Claude Code (vazio = o configurado)
+        type: string
+        default: ''
+      effort:
+        description: Raciocínio
+        type: choice
+        options: [configurado, low, medium, high, xhigh, max]
+        default: configurado
+      fast:
+        description: Modo rápido (cobra mais por token)
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -32,6 +46,11 @@ jobs:
       # Comandos deste repositório. `validate` precisa passar para a correção ser publicada.
       setup: ''
       validate: ''
+      # A sessão do Claude Code: modelo, raciocínio e modo rápido. O que vier do disparo manual
+      # vence; depois do `||` fica o valor usado nos disparos automáticos (vazio = o padrão).
+      model: ${{ inputs.model || '' }}
+      effort: ${{ (inputs.effort != 'configurado' && inputs.effort) || '' }}
+      fast: ${{ inputs.fast || false }}
       # Com o segredo do painel (abaixo), envia também o log da sessão ao FG Tracker.
       # report_logs: true
     secrets:

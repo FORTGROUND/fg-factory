@@ -49,9 +49,17 @@ on:
         type: string
         default: 'https://tracker-api.fortground.com.br'
       model:
-        description: Modelo do Claude Code (vazio = o padrão da conta)
+        description: Modelo do Claude Code, apelido ou nome completo (vazio = o padrão da conta)
         type: string
         default: ''
+      effort:
+        description: Nível de raciocínio do Claude Code - low, medium, high, xhigh ou max (vazio = o padrão do modelo)
+        type: string
+        default: ''
+      fast:
+        description: Modo rápido do Claude Code - mesmas respostas, mais velocidade e preço maior por token; só em modelos que o suportam
+        type: boolean
+        default: false
       report_logs:
         description: Envia o log da sessão ao painel da factory no FG Tracker (só com FG_TRACKER_FACTORY_TOKEN)
         type: boolean
@@ -346,6 +354,8 @@ jobs:
           WORK: ${{ steps.issue.outputs.work }}
           VALIDATE: ${{ inputs.validate }}
           MODEL: ${{ inputs.model }}
+          EFFORT: ${{ inputs.effort }}
+          FAST: ${{ inputs.fast }}
         run: |
           set -euo pipefail
           # Só a credencial do Claude que foi gravada fica no ambiente.
@@ -436,6 +446,15 @@ jobs:
           args=(-p "$(cat "$WORK/prompt.md")" --mcp-config "$WORK/mcp.json" --strict-mcp-config
                 --permission-mode bypassPermissions --disallowedTools WebFetch WebSearch --add-dir "$WORK" --output-format text)
           if [ -n "$MODEL" ]; then args+=(--model "$MODEL"); fi
+          case "$EFFORT" in
+            '') ;;
+            low|medium|high|xhigh|max) args+=(--effort "$EFFORT") ;;
+            *) echo "::error::effort inválido: '$EFFORT'. Use low, medium, high, xhigh ou max."; exit 1 ;;
+          esac
+          # O modo rápido só vale para a sessão: entra pelas configurações desta chamada.
+          if [ "$FAST" = "true" ]; then args+=(--settings '{"fastMode": true}'); fi
+          echo "Sessão: modelo ${MODEL:-padrão da conta}, raciocínio ${EFFORT:-padrão do modelo}, modo rápido $([ "$FAST" = "true" ] && echo ligado || echo desligado)." \
+            | tee -a "$GITHUB_STEP_SUMMARY"
           # Os tokens ficam só em arquivos de $WORK; fora do ambiente dos comandos do agente.
           env -u FG_TRACKER_TOKEN -u READ_TOKEN claude "${args[@]}" | tee "$WORK/out/session.log" | tail -40
           rm -f "$WORK/mcp.json" "$WORK/read-token"

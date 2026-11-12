@@ -118,7 +118,9 @@ minutos entram na cota do Actions da sua conta.
    lê a issue e o diff e julga pelo código. Aprovada, a revisão vai junto no PR. Reprovada, não
    há PR: a issue fica com `fg-factory:needs-human`, o comentário diz o que foi apontado e o
    diff fica nos artefatos da execução.
-6. **Publicação.** Branch `factory-issue-<n>-<tentativa>`, commit e PR com `Fixes #<n>`.
+6. **Publicação.** Branch `factory-issue-<n>-<tentativa>`, commit e PR com `Fixes #<n>`. Por
+   padrão a factory para aqui; com `merge: true` ela mesma faz o merge
+   ([Merge automático](#merge-automático)).
 7. **Merge.** Quando o PR entra na branch principal, o GitHub fecha a issue e o FG Tracker a
    marca como resolvida.
 
@@ -398,6 +400,9 @@ Entradas do workflow, todas opcionais, no `with:` do seu `factory.yml`:
 | `tracker_url` | API do FG Tracker | Para instalações próprias |
 | `review` | `true` | Revisão independente antes de publicar; `false` publica sem ela |
 | `review_model`, `review_effort`, `review_fast` | os de cima | Modelo, raciocínio e modo rápido do revisor (`review_fast` é `'true'` ou `'false'`) |
+| `merge` | `false` | Faz o merge do PR sozinha ([Merge automático](#merge-automático)) |
+| `merge_method` | `squash` | `squash`, `merge` ou `rebase` |
+| `merge_wait_minutes` | `30` | Quanto esperar pelos checks do PR (até 45) |
 | `report_logs` | `false` | Envia a saída da sessão ao painel do FG Tracker (com o segredo do painel) |
 
 ### Modelo, raciocínio e modo rápido
@@ -428,6 +433,27 @@ a situação em que dá errado; preferência de estilo vira observação no PR.
   Vazios, ele usa os mesmos de quem corrige. Um arranjo comum: quem corrige num modelo mais
   barato e o revisor num mais forte, ou o contrário.
 - Uma correção reprovada conta como tentativa. `review: false` desliga.
+
+### Merge automático
+
+O padrão é parar no pull request aberto, para uma pessoa olhar. Com `merge: true` no `with:` do
+`factory.yml`, a factory faz o merge na branch de destino quando **tudo** isto vale:
+
+- a validação do repositório passou;
+- o revisor independente aprovou (com `review: false` não há merge automático);
+- os checks do próprio PR terminaram sem falha, dentro de `merge_wait_minutes`;
+- o PR não recebeu commits depois da revisão e não tem conflito.
+
+Se qualquer item falha, nada é forçado: o PR fica aberto, a issue ganha
+`fg-factory:needs-human` e um comentário diz o motivo.
+
+- **Vários repositórios.** Todos os PRs precisam estar verdes antes do primeiro merge. Os dos
+  outros repositórios entram primeiro; o deste, que fecha a issue, por último.
+- **Workflows de push.** Com o GitHub App da factory, o merge dispara os workflows do
+  repositório (um deploy, por exemplo). Com o token do Actions o GitHub não os dispara.
+- **Onde ligar.** O merge leva uma mudança à branch principal sem ninguém olhar. Se a branch
+  principal faz deploy sozinha, isso é uma mudança em produção. Comece por repositórios de baixo
+  risco e com checks no PR; regras de proteção da branch continuam valendo e podem recusar o merge.
 
 ## Com uma IA
 

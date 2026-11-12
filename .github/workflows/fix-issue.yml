@@ -138,7 +138,7 @@ on:
         description: Chave da API da Anthropic, para quem não usa o token da assinatura
         required: false
       OPENAI_API_KEY:
-        description: Chave da API da OpenAI, para as sessões que rodam no Codex. Quem entra com a assinatura do ChatGPT faz o login no runner (codex-login.sh) e não usa este segredo
+        description: Chave da API da OpenAI, para as sessões que rodam no Codex. Quem entra com a assinatura do ChatGPT faz o login no runner (runner/setup.sh) e não usa este segredo
         required: false
       FG_TRACKER_TOKEN:
         description: Token do FG Tracker (modelo FG Factory) - lê telemetria, issues e releases e, com a permissão de relatar, alimenta o painel da factory. Pode vir do runner em vez deste segredo
@@ -201,15 +201,15 @@ jobs:
           stored() { [ -r "$FACTORY_CREDENTIALS" ] && grep -q "^$1=." "$FACTORY_CREDENTIALS"; }
           uses() { [ "$EXEC_AGENT" = "$1" ] || [ "$REVIEW_AGENT" = "$1" ]; }
           if uses claude && [ "$HAS_CLAUDE" != "true" ] && ! stored CLAUDE_CODE_OAUTH_TOKEN && ! stored ANTHROPIC_API_KEY; then
-            echo "::error title=Falta a credencial do Claude::Grave FACTORY_CLAUDE_TOKEN (ou FACTORY_ANTHROPIC_API_KEY) neste repositório, ou guarde a credencial no runner (README do fg-factory, Credenciais)."
+            echo "::error title=Falta a credencial do Claude::Grave FACTORY_CLAUDE_TOKEN (ou FACTORY_ANTHROPIC_API_KEY) neste repositório, ou rode bash setup.sh em runner/ na máquina do runner (README do fg-factory)."
             exit 1
           fi
           if uses codex && [ "$HAS_OPENAI" != "true" ] && ! stored OPENAI_API_KEY && [ ! -s "${CODEX_HOME:-$HOME/.codex}/auth.json" ]; then
-            echo "::error title=Falta a credencial do Codex::Entre com a assinatura do ChatGPT no runner (bash codex-login.sh) ou guarde a chave da API da OpenAI (bash set-credentials.sh, ou o segredo FACTORY_OPENAI_API_KEY). Veja o README do fg-factory, Claude Code ou Codex."
+            echo "::error title=Falta a credencial do Codex::Rode bash setup.sh em runner/ na máquina do runner (login do ChatGPT ou chave da API da OpenAI), ou grave o segredo FACTORY_OPENAI_API_KEY. Veja o README do fg-factory, Claude Code ou Codex."
             exit 1
           fi
           if [ "$HAS_TRACKER" != "true" ] && ! stored FG_TRACKER_TOKEN; then
-            echo "::error title=Falta o token do FG Tracker::Grave FACTORY_FG_TRACKER_TOKEN neste repositório, ou guarde o token no runner (README do fg-factory, Credenciais)."
+            echo "::error title=Falta o token do FG Tracker::Grave FACTORY_FG_TRACKER_TOKEN neste repositório, ou rode bash setup.sh em runner/ na máquina do runner (README do fg-factory)."
             exit 1
           fi
           # Painel do FG Tracker: o token próprio do painel ou, sem ele, o mesmo token do FG Tracker

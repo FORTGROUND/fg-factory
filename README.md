@@ -55,16 +55,10 @@ a **uma organização**; sem isso o FG Tracker recusa os relatos.
 
 Elas podem ficar em dois lugares. Escolha um:
 
-**No runner (uma vez para todos os repositórios).** Para runners próprios em contêiner. Em
-`runner/`, depois de criar o `.env` (passo 4):
-
-```sh
-bash set-credentials.sh
-```
-
-O script pergunta os dois valores sem mostrá-los e os grava no `.env` da máquina. Todo
-repositório atendido por esses runners passa a funcionar só com o `factory.yml`, sem segredos.
-Veja [Credenciais no runner](#credenciais-no-runner) antes de escolher.
+**No runner (uma vez por máquina, vale para todos os repositórios).** Para runners próprios em
+contêiner: o `bash setup.sh` de [Runners próprios](#runners-próprios) pede as duas numa janela do
+sistema e as entrega a todos os runners da máquina. Todo repositório atendido por eles funciona só
+com o `factory.yml`, sem segredos. Veja [Credenciais no runner](#credenciais-no-runner).
 
 **Em cada repositório (segredos do GitHub).** O caminho para o runner hospedado pelo GitHub, e
 para quem prefere credenciais diferentes por repositório:
@@ -198,23 +192,26 @@ uso misto sem tirar as suas credenciais dele.
 | Linux | Docker Engine com o plugin Compose |
 | Windows | Docker Desktop com a integração WSL; rode os comandos dentro do WSL |
 
-1. Clone este repositório na máquina e entre em `runner/`.
-2. Gere o token de registro (vale 1 hora). Em uma organização:
+1. Instale o `gh` e entre com uma conta owner da organização (`gh auth login`).
+2. Clone este repositório na máquina e rode, em `runner/`:
    ```sh
-   gh api -X POST orgs/minha-org/actions/runners/registration-token --jq .token
+   bash setup.sh
    ```
-   Em um repositório de conta pessoal: `repos/dono/repo/actions/runners/registration-token`.
-3. Crie o `.env` a partir do exemplo e preencha a organização, o nome da máquina e o token:
-   ```sh
-   cp .env.example .env
-   ```
-4. Suba um serviço por issue simultânea:
-   ```sh
-   docker compose up -d runner1            # uma issue por vez
-   docker compose up -d runner1 runner2    # duas (há até runner4)
-   ```
-5. Confira em Settings → Actions → Runners: `factory-<máquina>-1` aparece como *Idle*, só com
-   o rótulo `factory`. Apague o token do `.env`; o registro fica no volume do contêiner.
+
+O `setup.sh` faz tudo de uma vez, e rodar de novo é seguro (Enter mantém o que já está gravado):
+
+- pergunta o nome da máquina, **quantas tarefas ao mesmo tempo** (um runner por tarefa, até 4),
+  qual agente usar (Claude Code ou Codex) e se os testes podem subir contêineres;
+- pede as credenciais numa **janela do sistema** (Windows pelo WSL, macOS, ou Linux com
+  `zenity`; sem janela, no terminal), sem mostrar o que é digitado. Digitadas uma vez, valem para
+  todos os runners da máquina;
+- registra os runners na organização (o token de registro sai do `gh`) e os sobe;
+- com o Codex pela assinatura do ChatGPT, faz o login uma vez para todos os runners;
+- confere que os runners ficaram online e oferece apagar segredos de repositório antigos, que
+  passariam por cima das credenciais da máquina.
+
+Para mais tarefas ao mesmo tempo, outro agente ou um token novo, rode `bash setup.sh` de novo.
+Cada tarefa simultânea é uma sessão do agente a mais na sua conta e mais CPU e memória na máquina.
 
 A imagem traz git, gh, jq, Node, pnpm, bun, Rust, ffmpeg, o Claude Code e o Codex. Se o seu `validate` precisa de
 outra coisa (Python, Go, Java), acrescente ao `runner/Dockerfile` e reconstrua.
@@ -331,7 +328,7 @@ saída da sessão do Claude Code enquanto ela roda, ligue no `with:` do `factory
 
 ### Runners
 
-Só para runners em contêiner: com o token no `.env` da máquina (`bash set-credentials.sh`),
+Só para runners em contêiner: com o token no `.env` da máquina (`bash setup.sh`),
 cada runner envia um sinal a cada 30 segundos. Sem sinal por 2 minutos, o painel mostra o
 runner como offline.
 
@@ -406,7 +403,7 @@ repositório. O que muda:
   execução da factory, mas só para o repositório que os gravou.
 - Por isso: registre o runner só com o rótulo `factory` (é o padrão), use-o só em repositórios
   privados da sua organização e não deixe workflows de terceiros rodarem nele.
-- Trocar ou tirar: `bash set-credentials.sh` de novo, ou apague as linhas do `.env` e suba os
+- Trocar ou tirar: `bash setup.sh` de novo, ou apague as linhas do `.env` e suba os
   runners outra vez.
 
 ## Ajustes
@@ -467,10 +464,10 @@ padrão da conta):
 
 **Credencial do Codex**, uma das duas:
 
-- **Assinatura do ChatGPT:** `bash codex-login.sh` em `runner/` (um login por runner: `bash
-  codex-login.sh runner2`). O Codex mostra um endereço e um código para você confirmar no
-  navegador. O login fica num volume do runner e se renova sozinho.
-- **Chave da API da OpenAI:** `bash set-credentials.sh` (guarda no runner) ou o segredo
+- **Assinatura do ChatGPT:** o `bash setup.sh` faz o login: o Codex mostra um endereço e um
+  código para você confirmar no navegador. Um login só serve a todos os runners da máquina, fica
+  num volume dela e se renova sozinho.
+- **Chave da API da OpenAI:** o `bash setup.sh` a pede numa janela, ou o segredo
   `FACTORY_OPENAI_API_KEY` do repositório.
 
 O comentário da issue, o resumo da execução e o painel do FG Tracker dizem qual CLI e qual modelo

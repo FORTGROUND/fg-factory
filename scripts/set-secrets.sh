@@ -14,7 +14,7 @@
 #   - Painel:      opcional. Um token separado só para os relatos (modelo "FG Factory (relatos)"),
 #                  para quem quer o de cima só de leitura (README, "Painel no FG Tracker").
 #
-# Com runners próprios dá para pular este script: `runner/set-credentials.sh` guarda as
+# Com runners próprios dá para pular este script: `runner/setup.sh` guarda as
 # credenciais no runner, uma vez para todos os repositórios.
 set -euo pipefail
 REPO="${1:?Informe o repositório, ex.: minha-org/meu-repo}"

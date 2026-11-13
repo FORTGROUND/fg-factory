@@ -126,7 +126,7 @@ check() {
                reviewAgent: (if $review == "" then (if $agent == "" then "claude" else $agent end) else $review end),
                dockerInRunner: ($compose == "" or ($compose | contains("compose.docker.yml"))),
                runnersRunning: $running},
-     saved: {claude: ($claude or $anthropic), openai: $openai, tracker: $tracker, codexLogin: $codex},
+     saved: {claude: ($claude or $anthropic), anthropicKey: $anthropic, openai: $openai, tracker: $tracker, codexLogin: $codex},
      suggestion: {runners: $suggestion, max: $max, perRunnerCpus: $per_cpu, perRunnerGb: $per_gb}}'
 }
 

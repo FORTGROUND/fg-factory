@@ -18,6 +18,10 @@ use std::thread;
 const ICON_PNG: &[u8] = include_bytes!("../assets/icon-256.png");
 const TOKENS_URL: &str = "https://tracker.fortground.com.br/account/?tab=tokens&new=factory";
 const DEVICE_URL: &str = "https://github.com/login/device";
+const ANTHROPIC_KEYS_URL: &str = "https://platform.claude.com/settings/keys";
+const OPENAI_KEYS_URL: &str = "https://platform.openai.com/api-keys";
+/// A cor de um link com o mouse em cima: o destaque, mais claro.
+const LINK_HOVER: Color32 = Color32::from_rgb(0x8C, 0xF5, 0xE2);
 const README_URL: &str = "https://github.com/FORTGROUND/fg-factory#runners-próprios";
 
 const ACCENT: Color32 = Color32::from_rgb(0x22, 0xE5, 0xC2);
@@ -455,6 +459,7 @@ impl App {
                     if !self.form_ready && check.ready_for_form() {
                         self.answers = Answers::from_check(&check);
                         self.form_ready = true;
+                        self.claude_api_key = check.saved.anthropic_key;
                     }
                     self.check = Some(*check);
                     self.check_error = None;
@@ -559,6 +564,7 @@ impl App {
         if !self.form_ready {
             self.answers = Answers::from_check(&check);
             self.form_ready = true;
+                        self.claude_api_key = check.saved.anthropic_key;
         }
         let locked = self.busy.is_some();
         ui.add_enabled_ui(!locked, |ui| {
@@ -693,28 +699,44 @@ impl App {
             ui.add_space(6.0);
             if self.answers.uses(Agent::Claude) {
                 ui.label(RichText::new("Claude Code").strong());
-                let login = self.login.as_mut().filter(|l| l.kind == LoginKind::Claude);
-                let typed = !self.answers.claude.trim().is_empty();
-                if login.as_ref().is_some_and(|l| l.connected) || (typed && !self.claude_api_key) {
-                    status(ui, true, "Conta do Claude conectada. O token é gravado quando você configurar.");
-                } else if check.saved.claude {
-                    status(ui, true, "Conectado (já gravado nesta máquina)");
+                let before = self.claude_api_key;
+                ui.horizontal(|ui| {
+                    ui.radio_value(&mut self.claude_api_key, false, "Conta do Claude");
+                    ui.radio_value(&mut self.claude_api_key, true, "Chave da API da Anthropic");
+                });
+                // Trocou de jeito: o que foi digitado ou conectado no outro não vale aqui.
+                if before != self.claude_api_key {
+                    self.answers.claude.clear();
                 }
-                match login {
-                    Some(login) if login.running() => claude_login_steps(ui, login, &mut actions),
-                    login => {
-                        if let Some(error) = login.and_then(|l| l.ended.filter(|_| !l.connected).map(|_| login_error(&l.output))) {
-                            ui.label(RichText::new(error).color(DANGER));
-                        }
-                        let label = if check.saved.claude || typed { "Conectar de novo" } else { "Conectar com a conta do Claude" };
-                        if ui.add_enabled(!applying, egui::Button::new(RichText::new(label).strong())).clicked() {
-                            actions.push(Action::Login(LoginKind::Claude));
+                if self.claude_api_key {
+                    if check.saved.anthropic_key {
+                        status(ui, true, "Chave da API gravada nesta máquina");
+                    }
+                    secret_field(ui, &mut self.answers.claude, check.saved.anthropic_key, "sk-ant-api…");
+                    if anchor(ui, "Criar uma chave da API da Anthropic", ANTHROPIC_KEYS_URL) {
+                        actions.push(Action::Open(ANTHROPIC_KEYS_URL.into()));
+                    }
+                } else {
+                    let login = self.login.as_mut().filter(|l| l.kind == LoginKind::Claude);
+                    let typed = !self.answers.claude.trim().is_empty();
+                    let saved_account = check.saved.claude && !check.saved.anthropic_key;
+                    if login.as_ref().is_some_and(|l| l.connected) || typed {
+                        status(ui, true, "Conta do Claude conectada. O token é gravado quando você configurar.");
+                    } else if saved_account {
+                        status(ui, true, "Conta do Claude conectada (já gravada nesta máquina)");
+                    }
+                    match login {
+                        Some(login) if login.running() => claude_login_steps(ui, login, &mut actions),
+                        login => {
+                            if let Some(error) = login.and_then(|l| l.ended.filter(|_| !l.connected).map(|_| login_error(&l.output))) {
+                                ui.label(RichText::new(error).color(DANGER));
+                            }
+                            let label = if saved_account || typed { "Conectar de novo" } else { "Conectar com a conta do Claude" };
+                            if ui.add_enabled(!applying, egui::Button::new(RichText::new(label).strong())).clicked() {
+                                actions.push(Action::Login(LoginKind::Claude));
+                            }
                         }
                     }
-                }
-                ui.checkbox(&mut self.claude_api_key, "Prefiro usar uma chave da API da Anthropic");
-                if self.claude_api_key {
-                    secret_field(ui, &mut self.answers.claude, check.saved.claude, "sk-ant-api…");
                 }
                 ui.add_space(10.0);
             }
@@ -725,7 +747,13 @@ impl App {
                     ui.radio_value(&mut self.answers.codex_login, CodexLogin::Api, "Chave da API da OpenAI");
                 });
                 if self.answers.codex_login == CodexLogin::Api {
+                    if check.saved.openai {
+                        status(ui, true, "Chave da API gravada nesta máquina");
+                    }
                     secret_field(ui, &mut self.answers.openai, check.saved.openai, "sk-…");
+                    if anchor(ui, "Criar uma chave da API da OpenAI", OPENAI_KEYS_URL) {
+                        actions.push(Action::Open(OPENAI_KEYS_URL.into()));
+                    }
                 } else {
                     let login = self.login.as_ref().filter(|l| l.kind == LoginKind::Codex);
                     if check.saved.codex_login {
@@ -750,13 +778,11 @@ impl App {
             if check.saved.tracker {
                 status(ui, true, "Token gravado nesta máquina");
             }
-            ui.horizontal(|ui| {
-                if ui.button(RichText::new("Criar o token no FG Tracker").strong()).clicked() {
-                    actions.push(Action::Open(TOKENS_URL.into()));
-                }
-                ui.label(RichText::new("Modelo FG Factory, restrito à organização. Copie o token e cole aqui:").color(MUTED));
-            });
             secret_field(ui, &mut self.answers.tracker, check.saved.tracker, "Token do FG Tracker");
+            ui.label(RichText::new("Modelo FG Factory, restrito à organização. O painel abre com o token já preenchido.").color(MUTED));
+            if anchor(ui, "Criar o token no FG Tracker", TOKENS_URL) {
+                actions.push(Action::Open(TOKENS_URL.into()));
+            }
             ui.add_space(8.0);
             ui.checkbox(&mut self.answers.delete_old_secrets, "Apagar segredos antigos dos repositórios, que passariam por cima destas credenciais");
         });
@@ -958,7 +984,7 @@ impl App {
                     ui.label(RichText::new(step).color(ACCENT));
                 }
                 if let Some(url) = runner.run_url()
-                    && ui.link("Abrir a execução no GitHub").clicked() {
+                    && anchor(ui, "Abrir a execução no GitHub", &url) {
                         host.open_url(&url);
                     }
             });
@@ -1083,7 +1109,7 @@ impl App {
                 });
             });
         let host = self.host;
-        if ui.link("Como funciona (README do fg-factory)").clicked() {
+        if anchor(ui, "Como funciona (README do fg-factory)", README_URL) {
             host.open_url(README_URL);
         }
     }
@@ -1102,7 +1128,7 @@ fn claude_login_steps(ui: &mut egui::Ui, login: &mut Login, actions: &mut Vec<Ac
             }
             Some(url) => {
                 ui.label("1. Entre na sua conta do Claude na página que abriu no navegador e clique em Autorizar.");
-                if ui.link("A página não abriu? Abrir de novo").clicked() {
+                if anchor(ui, "A página não abriu? Abrir de novo", url) {
                     actions.push(Action::Open(url.clone()));
                 }
                 ui.add_space(4.0);
@@ -1139,7 +1165,7 @@ fn codex_login_steps(ui: &mut egui::Ui, login: &Login, actions: &mut Vec<Action>
                         ui.ctx().copy_text(code.clone());
                     }
                 });
-                if ui.link("A página não abriu? Abrir de novo").clicked() {
+                if anchor(ui, "A página não abriu? Abrir de novo", url) {
                     actions.push(Action::Open(url.clone()));
                 }
                 ui.horizontal(|ui| {
@@ -1195,6 +1221,27 @@ fn card(ui: &mut egui::Ui, title: &str, body: impl FnOnce(&mut egui::Ui)) {
             body(ui);
         });
     ui.add_space(10.0);
+}
+
+/// Um link com cara de link: texto em destaque e, com o mouse em cima, mais claro, sublinhado e
+/// com o cursor de mão; o endereço aparece ao parar sobre ele. Devolve se foi clicado: quem
+/// chama abre o endereço no navegador.
+fn anchor(ui: &mut egui::Ui, text: &str, url: &str) -> bool {
+    let id = ui.scope_id().with(("anchor", text));
+    let hovered = ui.ctx().data(|d| d.get_temp::<bool>(id)).unwrap_or(false);
+    let mut rich = RichText::new(text).color(if hovered { LINK_HOVER } else { ACCENT });
+    if hovered {
+        rich = rich.underline();
+    }
+    let response = ui
+        .add(egui::Label::new(rich).sense(egui::Sense::click()))
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text(url);
+    if response.hovered() != hovered {
+        ui.ctx().data_mut(|d| d.insert_temp(id, response.hovered()));
+        ui.ctx().request_repaint();
+    }
+    response.clicked()
 }
 
 fn state_color(runner: &RunnerStatus) -> Color32 {

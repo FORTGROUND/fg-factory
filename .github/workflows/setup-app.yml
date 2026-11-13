@@ -1,0 +1,99 @@
+# Monta o app FG Factory Setup (pasta app/) para macOS, Windows e Linux e, numa tag `app-v*`,
+# publica os três num release. O repositório é público, então os runners hospedados pelo GitHub
+# não custam minutos; os runners `factory` não servem aqui (não pegam repositório público e não
+# há macOS nem Windows entre eles).
+name: Setup app
+
+on:
+  push:
+    tags: ['app-v*']
+  pull_request:
+    paths: ['app/**', '.github/workflows/setup-app.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: macOS, os: macos-latest }
+          - { name: Windows, os: windows-latest }
+          - { name: Linux, os: ubuntu-latest }
+    defaults:
+      run:
+        shell: bash
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v5
+      - name: Rust
+        run: rustup toolchain install stable --profile minimal && rustup default stable
+      - name: Testes
+        run: cargo test --release --locked
+      - name: Versão
+        id: version
+        run: echo "version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)" >> "$GITHUB_OUTPUT"
+
+      - name: macOS (Apple Silicon e Intel)
+        if: runner.os == 'macOS'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+          cargo build --release --locked --target aarch64-apple-darwin
+          cargo build --release --locked --target x86_64-apple-darwin
+          app="dist/FG Factory Setup.app"
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+          lipo -create -output "$app/Contents/MacOS/fg-factory-setup" \
+            target/aarch64-apple-darwin/release/fg-factory-setup target/x86_64-apple-darwin/release/fg-factory-setup
+          sed "s/VERSION/$VERSION/g" packaging/Info.plist > "$app/Contents/Info.plist"
+          cp assets/icon.icns "$app/Contents/Resources/icon.icns"
+          # Sem certificado da Apple: assinatura local, para o macOS aceitar abrir com o botão direito.
+          codesign --force --deep --sign - "$app"
+          (cd dist && ditto -c -k --keepParent "FG Factory Setup.app" ../fg-factory-setup-macos.zip)
+
+      - name: Windows
+        if: runner.os == 'Windows'
+        run: |
+          cargo build --release --locked
+          mkdir -p dist && cp target/release/fg-factory-setup.exe dist/
+          (cd dist && 7z a -tzip ../fg-factory-setup-windows.zip fg-factory-setup.exe)
+
+      - name: Linux
+        if: runner.os == 'Linux'
+        run: |
+          cargo build --release --locked
+          tar -czf fg-factory-setup-linux-x86_64.tar.gz -C target/release fg-factory-setup
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fg-factory-setup-${{ matrix.name }}
+          path: app/fg-factory-setup-*
+          retention-days: 14
+
+  release:
+    name: Publicar
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/app-v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --title "FG Factory Setup ${TAG#app-v}" \
+            --notes "O app que configura os runners do FG Factory numa máquina. Passo a passo no README, \"Configurar uma máquina\"."

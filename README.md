@@ -274,12 +274,23 @@ bash setup.sh
 Ele pergunta no terminal e pede os segredos numa janela do sistema (ou no terminal, sem
 mostrar o que é digitado). `bash setup.sh --check` mostra, em JSON, o que a máquina tem.
 
-**4. Ligue o automático em cada repositório** quando quiser, no cartão **Repositórios** da aba
-Configurar: ele lista os repositórios da organização com o workflow (os que ainda esperam o merge
-do PR aparecem marcados) e cada chave grava a variável `FACTORY_AUTO` do repositório na hora. Essa
-variável é do repositório, não do runner. Desligado, só roda o que você disparar à mão e as
-respostas a issues que esperam uma pessoa. No terminal: `bash setup.sh --repos` e
-`bash setup.sh --auto <repositório> on|off`.
+**4. Configure cada repositório** na aba **Repositórios** do app. Tudo o que vale por repositório
+fica nela, gravado no próprio repositório do GitHub (vale em qualquer máquina):
+
+- **Automático:** a variável `FACTORY_AUTO`. Ligado, toda issue nova do FG Tracker no repositório
+  dispara a factory; desligado, só roda o que você disparar à mão e as respostas a issues que
+  esperam uma pessoa. Os repositórios cujo workflow ainda está num PR aparecem como "Esperando o
+  merge".
+- **Editar** (a IA do repositório, na variável `FACTORY_SETTINGS`): quem corrige e quem revisa
+  (Claude Code ou Codex), o modelo, o raciocínio e o modo rápido de cada um, o revisor ligado ou
+  não e o merge automático. O que fica em "padrão" segue a configuração central e, por fim, a da
+  máquina; "Voltar ao padrão" apaga a variável.
+
+Quem vence, numa execução: o disparo manual, depois `FACTORY_SETTINGS` do repositório, depois o
+bloco `REPOS` da configuração central (`FORTGROUND/ci`, `factory-settings.yml`), depois `DEFAULTS`
+dela, depois o que a máquina declara no `.env`. No terminal: `bash setup.sh --repos`,
+`bash setup.sh --auto <repositório> on|off` e
+`echo '{"agent":"codex"}' | bash setup.sh --repo-settings <repositório>`.
 
 A imagem traz git, gh, jq, Node, pnpm, bun, Rust, ffmpeg, o Claude Code e o Codex. Se o seu `validate` precisa de
 outra coisa (Python, Go, Java), acrescente ao `runner/Dockerfile` e reconstrua.

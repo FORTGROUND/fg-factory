@@ -10,7 +10,7 @@ mod model;
 
 use eframe::egui::{self, Color32, RichText};
 use host::Host;
-use model::{Agent, Answers, Check, CodexLogin, LineKind, LogLine, RunnerStatus, StatusPage};
+use model::{Agent, Answers, Check, CodexLogin, LineKind, LogLine, RepoList, RunnerStatus, StatusPage};
 use std::time::{Duration, Instant};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread;
@@ -85,6 +85,19 @@ enum Msg {
     Status(Result<StatusPage, String>),
     Logs(String, String),
     ActionDone(Result<String, String>),
+    Repos(Result<RepoList, String>),
+    AutoDone(Result<String, String>),
+}
+
+/// Os repositórios com o workflow e a chave do disparo automático (FACTORY_AUTO).
+#[derive(Default)]
+struct Repos {
+    list: Option<RepoList>,
+    error: Option<String>,
+    loading: bool,
+    requested: bool,
+    acting: Option<String>,
+    message: Option<Result<String, String>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -168,6 +181,7 @@ struct App {
     tests_finished: Option<bool>,
     tab: Tab,
     watcher: Watcher,
+    repos: Repos,
 }
 
 impl App {
@@ -196,6 +210,7 @@ impl App {
             tests_finished: None,
             tab: Tab::Setup,
             watcher: Watcher::default(),
+            repos: Repos::default(),
         };
         app.run(Task::Bootstrap);
         app
@@ -270,8 +285,9 @@ impl App {
         let Some(dir) = self.dir.clone() else { return };
         let setup = format!("bash {}", shell_quote(&format!("{dir}/setup.sh")));
         let due = |last: Option<Instant>, every: u64| last.is_none_or(|t| t.elapsed() >= Duration::from_secs(every));
-        let watching = self.tab == Tab::Runners || !self.watcher.tab_chosen;
-        if watching && !self.watcher.loading && self.busy != Some(Task::Apply) && due(self.watcher.last, 3) {
+        // Na aba Runners a cada 3 s; na de configurar, a cada 10 s (ela mostra o que falta nos runners).
+        let every = if self.tab == Tab::Runners || !self.watcher.tab_chosen { 3 } else { 10 };
+        if !self.watcher.loading && self.busy != Some(Task::Apply) && due(self.watcher.last, every) {
             self.watcher.loading = true;
             self.watcher.last = Some(Instant::now());
             let (host, tx, ctx, setup) = (self.host, self.tx.clone(), self.ctx.clone(), setup.clone());
@@ -292,6 +308,109 @@ impl App {
                     ctx.request_repaint();
                 });
             }
+    }
+
+    fn load_repos(&mut self) {
+        let Some(dir) = self.dir.clone() else { return };
+        if self.repos.loading {
+            return;
+        }
+        self.repos.loading = true;
+        self.repos.requested = true;
+        let setup = format!("bash {}", shell_quote(&format!("{dir}/setup.sh")));
+        let (host, tx, ctx) = (self.host, self.tx.clone(), self.ctx.clone());
+        thread::spawn(move || {
+            let result = host.output(&format!("{setup} --repos")).and_then(|t| model::parse_repos(&t));
+            let _ = tx.send(Msg::Repos(result));
+            ctx.request_repaint();
+        });
+    }
+
+    fn set_auto(&mut self, repository: String, on: bool) {
+        let Some(dir) = self.dir.clone() else { return };
+        if self.repos.acting.is_some() {
+            return;
+        }
+        self.repos.acting = Some(repository.clone());
+        self.repos.message = None;
+        let setup = format!("bash {}", shell_quote(&format!("{dir}/setup.sh")));
+        let (host, tx, ctx) = (self.host, self.tx.clone(), self.ctx.clone());
+        thread::spawn(move || {
+            let command = format!("{setup} --auto {} {}", shell_quote(&repository), if on { "on" } else { "off" });
+            let result = host.output(&command).map(|out| {
+                out.lines().rev().find_map(|l| l.strip_prefix("::ok::").map(str::to_owned)).unwrap_or_else(|| "Feito.".into())
+            }).map_err(|err| {
+                err.lines().rev().find_map(|l| l.strip_prefix("::fail::").or_else(|| l.strip_prefix("Erro: ")).map(str::to_owned)).unwrap_or(err)
+            });
+            let _ = tx.send(Msg::AutoDone(result));
+            ctx.request_repaint();
+        });
+    }
+
+    /// Cada repositório com o workflow e a chave do disparo automático, que grava FACTORY_AUTO nele.
+    fn repos_card(&mut self, ui: &mut egui::Ui) {
+        if !self.repos.requested {
+            self.load_repos();
+        }
+        let mut toggle: Option<(String, bool)> = None;
+        let mut reload = false;
+        card(ui, "Repositórios: disparo automático", |ui| {
+            ui.label(RichText::new("Ligado, toda issue nova que o FG Tracker abre no repositório vai sozinha para a factory. Desligado, só roda o que você disparar à mão (Actions, Factory, Run workflow) e as respostas a issues que esperam uma pessoa. Cada execução é uma sessão do agente na sua conta.").color(MUTED));
+            ui.add_space(6.0);
+            match &self.repos.list {
+                None if self.repos.error.is_none() => {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label("Procurando os repositórios com o workflow…");
+                    });
+                }
+                None => {}
+                Some(list) if list.repos.is_empty() => {
+                    ui.label(format!("Nenhum repositório de {} tem o workflow da factory ainda.", list.org));
+                }
+                Some(list) => {
+                    egui::Grid::new("repos").num_columns(2).spacing([16.0, 6.0]).show(ui, |ui| {
+                        for repo in &list.repos {
+                            ui.label(RichText::new(&repo.repository).monospace());
+                            if repo.workflow == "main" {
+                                let mut on = repo.auto;
+                                let acting = self.repos.acting.as_deref() == Some(repo.repository.as_str());
+                                ui.horizontal(|ui| {
+                                    if ui.add_enabled(self.repos.acting.is_none(), egui::Checkbox::new(&mut on, if repo.auto { "Automático ligado" } else { "Automático desligado" })).changed() {
+                                        toggle = Some((repo.repository.clone(), on));
+                                    }
+                                    if acting {
+                                        ui.spinner();
+                                    }
+                                });
+                            } else {
+                                ui.label(RichText::new("O workflow está num PR esperando o merge").color(WARN));
+                            }
+                            ui.end_row();
+                        }
+                    });
+                }
+            }
+            if let Some(error) = &self.repos.error {
+                ui.label(RichText::new(error).color(DANGER));
+            }
+            match &self.repos.message {
+                Some(Ok(text)) => {
+                    ui.label(RichText::new(text).color(ACCENT));
+                }
+                Some(Err(text)) => {
+                    ui.label(RichText::new(text).color(DANGER));
+                }
+                None => {}
+            }
+            reload = !self.repos.loading && anchor(ui, "Ler de novo", "Procura os repositórios outra vez");
+        });
+        if let Some((repository, on)) = toggle {
+            self.set_auto(repository, on);
+        }
+        if reload {
+            self.load_repos();
+        }
     }
 
     /// Pausar, retomar ou remover um runner (`setup.sh --pause|--resume|--remove`).
@@ -402,6 +521,21 @@ impl App {
                     if self.watcher.selected.as_deref() == Some(service.as_str()) {
                         self.watcher.logs = text;
                     }
+                }
+                Msg::Repos(result) => {
+                    self.repos.loading = false;
+                    match result {
+                        Ok(list) => {
+                            self.repos.list = Some(list);
+                            self.repos.error = None;
+                        }
+                        Err(e) => self.repos.error = Some(e),
+                    }
+                }
+                Msg::AutoDone(result) => {
+                    self.repos.acting = None;
+                    self.repos.message = Some(result);
+                    self.load_repos();
                 }
                 Msg::ActionDone(result) => {
                     self.watcher.acting = None;
@@ -574,6 +708,7 @@ impl App {
         });
         self.apply_bar(ui, &check);
         self.tests_card(ui, &check);
+        self.repos_card(ui);
         self.device_code(ui);
         self.log_view(ui);
     }
@@ -618,6 +753,12 @@ impl App {
             }
             if check.current.runners_running > 0 {
                 status(ui, true, &format!("{} runner(s) rodando agora nesta máquina", check.current.runners_running));
+            }
+            // O que cada runner precisa para trabalhar, conferido a cada poucos segundos.
+            for runner in self.watcher.page.iter().flat_map(|p| p.runners.iter()) {
+                for problem in &runner.problems {
+                    status(ui, false, &format!("{}: {problem}", runner.service));
+                }
             }
             ui.horizontal(|ui| {
                 if ui.add_enabled(self.busy.is_none(), egui::Button::new("Conferir de novo")).clicked() {
@@ -925,6 +1066,13 @@ impl App {
                                         ui.label(RichText::new(&runner.title).color(MUTED));
                                     }
                                 });
+                            } else if runner.state == "attention" {
+                                for problem in &runner.problems {
+                                    ui.label(RichText::new(format!("• {problem}")).color(DANGER));
+                                }
+                                if anchor(ui, "Resolver na aba Configurar", "Credenciais e token do FG Tracker") {
+                                    go_setup = true;
+                                }
                             } else if runner.state == "paused" {
                                 ui.label(RichText::new("Não pega tarefas até ser retomado.").color(MUTED));
                             } else if runner.state == "offline" {
@@ -1249,6 +1397,7 @@ fn state_color(runner: &RunnerStatus) -> Color32 {
         "working" => ACCENT,
         "idle" => Color32::from_rgb(0x8F, 0xD3, 0x9C),
         "paused" => WARN,
+        "attention" => DANGER,
         _ => DANGER,
     }
 }

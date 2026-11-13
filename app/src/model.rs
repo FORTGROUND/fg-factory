@@ -433,6 +433,8 @@ pub struct RunnerStatus {
     pub agent: String,
     pub review_agent: String,
     pub log_lines: u64,
+    /// O que impede o runner de trabalhar (credenciais, token recusado pelo painel).
+    pub problems: Vec<String>,
 }
 
 impl RunnerStatus {
@@ -441,6 +443,7 @@ impl RunnerStatus {
             "paused" => "Pausado",
             "working" => "Trabalhando",
             "idle" => "Livre",
+            "attention" => "Precisa de configuração",
             _ => "Sem sinal do GitHub",
         }
     }
@@ -464,6 +467,28 @@ impl RunnerStatus {
     }
 }
 
+/// Os repositórios com o workflow da factory (`setup.sh --repos`).
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct RepoList {
+    pub org: String,
+    pub repos: Vec<RepoAuto>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct RepoAuto {
+    pub repository: String,
+    /// main (o workflow está na branch principal) ou pr (ainda no pull request).
+    pub workflow: String,
+    pub auto: bool,
+}
+
+pub fn parse_repos(text: &str) -> Result<RepoList, String> {
+    let start = text.find('{').ok_or_else(|| format!("O setup.sh não respondeu como esperado:\n{}", text.trim()))?;
+    serde_json::from_str(&text[start..]).map_err(|e| format!("Resposta do setup.sh ilegível ({e})."))
+}
+
 pub fn parse_status(text: &str) -> Result<StatusPage, String> {
     let start = text.find('{').ok_or_else(|| format!("O setup.sh não respondeu como esperado:\n{}", text.trim()))?;
     serde_json::from_str(&text[start..]).map_err(|e| format!("Resposta do setup.sh ilegível ({e})."))
@@ -485,5 +510,10 @@ mod status_tests {
         assert_eq!(working.run_url().as_deref(), Some("https://github.com/FORTGROUND/gallery-backend/actions/runs/987"));
         assert_eq!((paused.state_label(), paused.step_label(), paused.run_url()), ("Pausado", None, None));
         assert!(parse_status("erro").is_err());
+        let attention = parse_status(r#"{"runners":[{"service":"runner1","running":true,"state":"attention","problems":["sem as credenciais guardadas"]}]}"#).unwrap();
+        assert_eq!(attention.runners[0].state_label(), "Precisa de configuração");
+        assert_eq!(attention.runners[0].problems, ["sem as credenciais guardadas"]);
+        let repos = parse_repos(r#"{"org":"FORTGROUND","repos":[{"repository":"FORTGROUND/a","workflow":"main","auto":true},{"repository":"FORTGROUND/b","workflow":"pr","auto":false}]}"#).unwrap();
+        assert_eq!((repos.repos[0].auto, repos.repos[1].workflow.as_str()), (true, "pr"));
     }
 }

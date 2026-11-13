@@ -17,6 +17,8 @@
 #   bash setup.sh --status        o que cada runner desta máquina está fazendo, em JSON
 #   bash setup.sh --logs runnerN  as últimas linhas do log da IA na tarefa atual do runner
 #   bash setup.sh --pause runnerN | --resume runnerN | --remove runnerN
+#   bash setup.sh --repos         os repositórios com o workflow da factory e se o automático está ligado
+#   bash setup.sh --auto <repo> on|off   liga ou desliga o disparo automático (FACTORY_AUTO) no repositório
 #
 # Rodar de novo é seguro: o que fica em branco mantém o valor gravado.
 #
@@ -336,10 +338,56 @@ if [ "$busy" = true ] && [ -n "$w" ]; then
   fi
 elif [ "$busy" = true ]; then step=setup
 fi
-jq -nc --argjson busy "$busy" --arg repo "$repo" --arg number "$number" --arg title "$title" --arg step "$step" --arg run "$run" \
+# O que impede o runner de trabalhar, conferido sem gastar sessão: as credenciais guardadas e a
+# credencial de cada agente escolhido. (O token do FG Tracker é conferido pelo sinal ao painel.)
+f=/home/factory/.fg-factory/credentials
+has() { grep -q "^$1=." "$f" 2>/dev/null; }
+problems=""
+if [ ! -s "$f" ]; then problems="sem as credenciais guardadas"
+else
+  for a in $(printf "%s\n" "${FACTORY_AGENT:-claude}" "${FACTORY_REVIEW_AGENT:-${FACTORY_AGENT:-claude}}" | sort -u); do
+    if [ "$a" = claude ]; then has CLAUDE_CODE_OAUTH_TOKEN || has ANTHROPIC_API_KEY || problems="$problems|sem a credencial do Claude Code"
+    else has OPENAI_API_KEY || su factory -s /bin/sh -c "HOME=/home/factory codex login status" >/dev/null 2>&1 || problems="$problems|o Codex não está conectado"
+    fi
+  done
+  has FG_TRACKER_TOKEN || problems="$problems|sem o token do FG Tracker"
+fi
+jq -nc --arg problems "$problems" "\$problems | split(\"|\") | map(select(length > 0))" > /tmp/fg-problems.json
+jq -nc --argjson problems "$(cat /tmp/fg-problems.json)" --argjson busy "$busy" --arg repo "$repo" --arg number "$number" --arg title "$title" --arg step "$step" --arg run "$run" \
   --arg agent "${FACTORY_AGENT:-claude}" --arg review "${FACTORY_REVIEW_AGENT:-${FACTORY_AGENT:-claude}}" --argjson lines "$( [ -n "$log" ] && wc -l < "$log" 2>/dev/null || echo 0)" \
-  "{busy: \$busy, repository: \$repo, issue: (\$number | tonumber? // null), title: \$title, step: \$step, runId: \$run, agent: \$agent, reviewAgent: \$review, logLines: \$lines}"
+  "{problems: \$problems, busy: \$busy, repository: \$repo, issue: (\$number | tonumber? // null), title: \$title, step: \$step, runId: \$run, agent: \$agent, reviewAgent: \$review, logLines: \$lines}"
 '
+
+# ---- repositórios: quem tem o workflow e se o disparo automático está ligado -------------------
+# FACTORY_AUTO é uma variável de cada repositório no GitHub, não do runner: com `true`, toda
+# issue aberta pelo FG Tracker no repositório dispara a factory sozinha.
+repo_line() {  # repo_line <dono/nome> -> uma linha JSON
+  local repo="$1" workflow=main auto
+  if ! gh api "repos/$repo/contents/.github/workflows/factory.yml" --silent >/dev/null 2>&1; then
+    if gh api "repos/$repo/contents/.github/workflows/factory.yml?ref=factory-workflow" --silent >/dev/null 2>&1; then workflow=pr; else return 0; fi
+  fi
+  auto="$(gh api "repos/$repo/actions/variables/FACTORY_AUTO" --jq .value 2>/dev/null || true)"
+  jq -nc --arg repo "$repo" --arg workflow "$workflow" --arg auto "$auto" '{repository: $repo, workflow: $workflow, auto: ($auto == "true")}'
+}
+list_repos() {
+  local org; org="$(default_org)"
+  command -v gh >/dev/null && gh auth status >/dev/null 2>&1 || fail "o gh não está logado."
+  export -f repo_line
+  gh repo list "$org" --limit 300 --no-archived --json nameWithOwner,isPrivate --jq '.[] | select(.isPrivate) | .nameWithOwner' 2>/dev/null \
+    | xargs -P 8 -I{} bash -c 'repo_line "$1"' _ {} | jq -sc --arg org "$org" '{org: $org, repos: (sort_by(.repository | ascii_downcase))}'
+}
+set_auto() {  # set_auto <repo> on|off
+  local repo="$1" org; org="$(default_org)"
+  case "$repo" in */*) ;; '') fail "informe o repositório." ;; *) repo="$org/$repo" ;; esac
+  [[ "$repo" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || fail "repositório inválido: '$repo'."
+  case "${2:-}" in
+    on) gh variable set FACTORY_AUTO --body true --repo "$repo" >/dev/null 2>&1 || fail "não consegui gravar FACTORY_AUTO em $repo (precisa de admin no repositório)."
+        say "::ok::Automático ligado em $repo: issues novas do FG Tracker disparam a factory." ;;
+    off) gh variable set FACTORY_AUTO --body false --repo "$repo" >/dev/null 2>&1 || fail "não consegui gravar FACTORY_AUTO em $repo."
+        say "::ok::Automático desligado em $repo: só roda o que for disparado à mão." ;;
+    *) fail "use on ou off." ;;
+  esac
+}
 
 compose_project() { docker compose config --format json 2>/dev/null | jq -r '.name // "runner"'; }
 
@@ -354,15 +402,21 @@ runners_status() {
     cid="$(docker compose ps -a -q "$service" 2>/dev/null | head -1)"
     [ -n "$cid" ] || continue
     running="$(docker inspect -f '{{.State.Running}}' "$cid" 2>/dev/null || echo false)"
-    probe='{}'
+    probe='{}'; beat=""
     if [ "$running" = true ]; then
       probe="$(docker compose exec -T -u root "$service" bash -c "$RUNNER_PROBE" 2>/dev/null || echo '{}')"
       jq -e . >/dev/null 2>&1 <<< "$probe" || probe='{}'
+      # O sinal ao painel diz se o FG Tracker aceita o token: o último que o runner registrou.
+      beat="$(docker compose logs --no-log-prefix --tail 400 "$service" 2>/dev/null | grep '^heartbeat:' | tail -1 || true)"
+      case "$beat" in
+        *"não aceito"*) probe="$(jq -c --arg p "o FG Tracker recusou o token ($(sed -n 's/.*(\(HTTP [0-9]*\)).*/\1/p' <<< "$beat"))" '.problems = ((.problems // []) + [$p])' <<< "$probe")" ;;
+      esac
     fi
     out="$(jq -c --arg service "$service" --arg name "factory-$machine-$i" --argjson running "$running" --argjson probe "$probe" --argjson github "$github" '
       ($github | map(select(.name == $name)) | .[0]) as $gh
       | . + [{service: $service, name: $name, running: $running, online: ($gh.status == "online"),
               state: (if $running | not then "paused" elif ($probe.busy // false) then "working"
+                      elif (($probe.problems // []) | length) > 0 then "attention"
                       elif $gh == null or $gh.status != "online" then "offline" else "idle" end)} + $probe]' <<< "$out")"
   done
   jq -c --arg org "$org" '{org: $org, runners: .}' <<< "$out"
@@ -674,6 +728,8 @@ case "${1:-}" in
   --pause) ensure_env; pause_runner "${2:-}" ;;
   --resume) ensure_env; resume_runner "${2:-}" ;;
   --remove) ensure_env; remove_runner "${2:-}" ;;
+  --repos) ensure_env; list_repos ;;
+  --auto) ensure_env; set_auto "${2:-}" "${3:-}" ;;
   --apply) ensure_env; from_stdin; apply ;;
   '') ensure_env; interactive; apply ;;
   *) fail "opção desconhecida: $1 (veja o começo do setup.sh)" ;;

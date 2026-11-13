@@ -14,6 +14,9 @@
 #   bash setup.sh --login-claude  conecta a conta do Claude (claude setup-token, no contêiner)
 #   bash setup.sh --login-codex   conecta a conta do ChatGPT ao Codex (no contêiner, vale para todos)
 #   bash setup.sh --test          testa cada runner rodando nesta máquina, em paralelo
+#   bash setup.sh --status        o que cada runner desta máquina está fazendo, em JSON
+#   bash setup.sh --logs runnerN  as últimas linhas do log da IA na tarefa atual do runner
+#   bash setup.sh --pause runnerN | --resume runnerN | --remove runnerN
 #
 # Rodar de novo é seguro: o que fica em branco mantém o valor gravado.
 #
@@ -312,6 +315,104 @@ test_runners() {
   say "::ok::Todos os runners passaram no teste."
 }
 
+# ---- o que os runners estão fazendo ---------------------------------------------------------
+# Lido de dentro de cada contêiner (como root, porque a pasta da conclusão fica fechada durante a
+# revisão): o processo do job, a issue e os arquivos que a tarefa já gerou dizem a etapa.
+RUNNER_PROBE='
+w="$(ls -dt /home/factory/runner/_work/_temp/factory-[0-9]* 2>/dev/null | head -1)"
+busy=false; pgrep -x Runner.Worker >/dev/null && busy=true
+repo=""; number=""; title=""; step=""; run=""; log=""
+if [ "$busy" = true ] && [ -n "$w" ]; then
+  run="${w##*-}"
+  if [ -s "$w/issue.json" ]; then
+    repo="$(jq -r ".repository_url // \"\" | sub(\".*/repos/\"; \"\")" "$w/issue.json")"
+    number="$(jq -r ".number // \"\"" "$w/issue.json")"; title="$(jq -r ".title // \"\" | .[0:200]" "$w/issue.json")"
+  fi
+  if [ -d "$w/review" ] && [ ! -s "$w/review/review.json" ]; then step=review; log="$w/review/session.log"
+  elif [ -s "$w/review/review.json" ] || [ -s "$w/comment.final.md" ]; then step=publish; log="$w/out/session.log"
+  elif [ -s "$w/out/result.json" ]; then step=validate; log="$w/out/session.log"
+  elif [ -e "$w/out/session.log" ]; then step=agent; log="$w/out/session.log"
+  else step=setup
+  fi
+elif [ "$busy" = true ]; then step=setup
+fi
+jq -nc --argjson busy "$busy" --arg repo "$repo" --arg number "$number" --arg title "$title" --arg step "$step" --arg run "$run" \
+  --arg agent "${FACTORY_AGENT:-claude}" --arg review "${FACTORY_REVIEW_AGENT:-${FACTORY_AGENT:-claude}}" --argjson lines "$( [ -n "$log" ] && wc -l < "$log" 2>/dev/null || echo 0)" \
+  "{busy: \$busy, repository: \$repo, issue: (\$number | tonumber? // null), title: \$title, step: \$step, runId: \$run, agent: \$agent, reviewAgent: \$review, logLines: \$lines}"
+'
+
+compose_project() { docker compose config --format json 2>/dev/null | jq -r '.name // "runner"'; }
+
+runners_status() {
+  local org machine github='[]' service cid running probe state out='[]'
+  org="$(default_org)"; machine="$(clean_machine "$(env_get FACTORY_MACHINE)")"
+  if command -v gh >/dev/null && gh auth status >/dev/null 2>&1; then
+    github="$(gh api "orgs/$org/actions/runners" --paginate --jq "[.runners[] | select(.name | startswith(\"factory-$machine-\")) | {name, status, busy}]" 2>/dev/null | jq -s 'add // []' 2>/dev/null || echo '[]')"
+  fi
+  for i in $(seq 1 "$MAX_RUNNERS"); do
+    service="runner$i"
+    cid="$(docker compose ps -a -q "$service" 2>/dev/null | head -1)"
+    [ -n "$cid" ] || continue
+    running="$(docker inspect -f '{{.State.Running}}' "$cid" 2>/dev/null || echo false)"
+    probe='{}'
+    if [ "$running" = true ]; then
+      probe="$(docker compose exec -T -u root "$service" bash -c "$RUNNER_PROBE" 2>/dev/null || echo '{}')"
+      jq -e . >/dev/null 2>&1 <<< "$probe" || probe='{}'
+    fi
+    out="$(jq -c --arg service "$service" --arg name "factory-$machine-$i" --argjson running "$running" --argjson probe "$probe" --argjson github "$github" '
+      ($github | map(select(.name == $name)) | .[0]) as $gh
+      | . + [{service: $service, name: $name, running: $running, online: ($gh.status == "online"),
+              state: (if $running | not then "paused" elif ($probe.busy // false) then "working"
+                      elif $gh == null or $gh.status != "online" then "offline" else "idle" end)} + $probe]' <<< "$out")"
+  done
+  jq -c --arg org "$org" '{org: $org, runners: .}' <<< "$out"
+}
+
+valid_service() { case "$1" in runner[1-9]) [ "${1#runner}" -le "$MAX_RUNNERS" ] ;; *) false ;; esac || fail "runner inválido: '$1'."; }
+
+runner_logs() {  # o log da tarefa atual: o do revisor durante a revisão, senão o de quem corrige
+  valid_service "$1"
+  docker compose exec -T -u root "$1" bash -c '
+    w="$(ls -dt /home/factory/runner/_work/_temp/factory-[0-9]* 2>/dev/null | head -1)"
+    [ -n "$w" ] || exit 0
+    if [ -d "$w/review" ] && [ ! -s "$w/review/review.json" ] && [ -e "$w/review/session.log" ]; then f="$w/review/session.log"; else f="$w/out/session.log"; fi
+    [ -e "$f" ] && tail -n 400 "$f"' 2>/dev/null || true
+}
+
+runner_busy() { docker compose exec -T -u root "$1" pgrep -x Runner.Worker >/dev/null 2>&1; }
+
+pause_runner() {
+  valid_service "$1"
+  runner_busy "$1" && fail "o $1 está no meio de uma tarefa. Pause quando ele terminar."
+  docker compose stop "$1" >/dev/null 2>&1 || fail "não consegui parar o $1."
+  say "::ok::$1 pausado. Ele não pega tarefas até ser retomado."
+}
+
+resume_runner() {
+  valid_service "$1"
+  export FACTORY_ORG FACTORY_MACHINE; FACTORY_ORG="$(default_org)"; FACTORY_MACHINE="$(default_machine)"
+  docker compose up -d "$1" >/dev/null 2>&1 || fail "não consegui retomar o $1."
+  say "::ok::$1 retomado."
+}
+
+# Tira o runner da máquina e do GitHub: o contêiner, o registro (volume) e o Docker próprio dele.
+remove_runner() {
+  valid_service "$1"
+  local org machine name id project
+  org="$(default_org)"; machine="$(clean_machine "$(env_get FACTORY_MACHINE)")"; name="factory-$machine-${1#runner}"
+  if docker compose ps --services --status running 2>/dev/null | grep -qx "$1" && runner_busy "$1"; then
+    fail "o $1 está no meio de uma tarefa. Remova quando ele terminar."
+  fi
+  project="$(compose_project)"
+  docker compose rm -sf "$1" >/dev/null 2>&1 || true
+  docker volume rm "${project}_$1" "${project}_docker${1#runner}" >/dev/null 2>&1 || true
+  id="$(gh api "orgs/$org/actions/runners" --paginate --jq ".runners[] | select(.name == \"$name\") | .id" 2>/dev/null | head -1 || true)"
+  if [ -n "$id" ]; then
+    gh api -X DELETE "orgs/$org/actions/runners/$id" >/dev/null 2>&1 || fail "o contêiner saiu, mas o GitHub não removeu o registro de $name (a conta do gh precisa ser owner de $org)."
+  fi
+  say "::ok::$1 removido desta máquina e do GitHub."
+}
+
 # ---- perguntas do modo interativo -------------------------------------------------------------
 read_line() {
   if [ -z "$DRY" ] && [ -r /dev/tty ]; then IFS= read -r "$@" < /dev/tty || true; else IFS= read -r "$@" || true; fi
@@ -568,6 +669,11 @@ case "${1:-}" in
   --login-claude) ensure_env; login_claude ;;
   --login-codex) ensure_env; login_codex ;;
   --test) ensure_env; test_runners ;;
+  --status) ensure_env; runners_status ;;
+  --logs) ensure_env; runner_logs "${2:-}" ;;
+  --pause) ensure_env; pause_runner "${2:-}" ;;
+  --resume) ensure_env; resume_runner "${2:-}" ;;
+  --remove) ensure_env; remove_runner "${2:-}" ;;
   --apply) ensure_env; from_stdin; apply ;;
   '') ensure_env; interactive; apply ;;
   *) fail "opção desconhecida: $1 (veja o começo do setup.sh)" ;;

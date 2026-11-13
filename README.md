@@ -243,6 +243,22 @@ Settings → Resources: o app sugere quantos runners cabem pelo que o Docker tem
 Para mudar algo depois (mais runners, outro agente, um token novo), abra o app de novo: o que
 fica em branco mantém o que já está gravado.
 
+**Acompanhar os runners.** Com runners na máquina, o app abre na aba **Runners**, que se
+atualiza a cada 3 segundos:
+
+- o estado de cada runner: livre, trabalhando, pausado ou sem sinal do GitHub;
+- quando trabalha: a etapa (preparando, corrigindo, validando, revisando, publicando, com o
+  agente de cada uma), o repositório, a issue e o título dela, e o link da execução no GitHub;
+- **Ver log**: o que a IA está fazendo na etapa atual (o que escreveu e cada ferramenta que
+  chamou), atualizado a cada 2 segundos. Na revisão, o log é o do revisor;
+- **Pausar** e **Retomar**: um runner pausado não pega tarefas; os jobs esperam outro runner;
+- **Remover**: tira o runner da máquina e do GitHub (o contêiner, o registro e o Docker próprio).
+
+Pausar e remover só valem com o runner livre, para não interromper uma tarefa no meio. Tudo isso
+é lido de dentro dos contêineres da máquina: não precisa de token nem de internet além da
+consulta ao GitHub sobre quem está online. No terminal: `bash setup.sh --status`,
+`--logs runnerN`, `--pause runnerN`, `--resume runnerN` e `--remove runnerN`.
+
 **Sem o app.** O app é uma interface para o `runner/setup.sh`, que faz o mesmo no terminal:
 
 ```sh

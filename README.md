@@ -217,14 +217,16 @@ Settings → Resources: o app sugere quantos runners cabem pelo que o Docker tem
    sugestão pelo que o Docker tem (cada runner chega a uns 3 núcleos e 6 GB num build pesado);
 4. pergunta **quem corrige** e **quem revisa**: Claude Code ou Codex, cada etapa com o seu;
 5. pede só as credenciais que essas escolhas usam, sem terminal:
-   - **Claude Code:** o botão **Conectar com a conta do Claude** abre a página de login no
-     navegador. Entre, clique em Autorizar, copie o código que a página mostra e cole no app.
-     O app pega o token sozinho (vale um ano). Quem prefere, marca "chave da API da Anthropic"
-     e cola a chave;
+   - **Claude Code:** escolha **Conta do Claude** ou **Chave da API da Anthropic**. Pela conta,
+     o botão **Conectar com a conta do Claude** abre a página de login no navegador; entre,
+     clique em Autorizar, copie o código que a página mostra e cole no app, que pega o token
+     sozinho (vale um ano). Pela chave, cole a chave; o link "Criar uma chave da API da
+     Anthropic" abre a página de chaves;
    - **Codex:** o botão **Conectar com a conta do ChatGPT** abre a página e mostra um código
      grande; digite-o na página e pronto. Um login serve a todos os runners da máquina. Ou
      escolha a chave da API da OpenAI e cole a chave. Na conta do ChatGPT, o login por código
-     precisa estar permitido (Configurações → Segurança);
+     precisa estar permitido (Configurações → Segurança). Pela chave, o link "Criar uma chave da
+     API da OpenAI" abre a página de chaves;
    - **FG Tracker:** o botão **Criar o token no FG Tracker** abre o painel com o novo token já
      preenchido: modelo **FG Factory**, restrito à organização em que você está, com o nome dela
      em destaque. Se você não estiver logado, o painel pede o login e volta para o mesmo lugar;

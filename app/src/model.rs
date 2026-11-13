@@ -48,7 +48,10 @@ pub struct Current {
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Saved {
+    /// Alguma credencial do Claude: o token da conta ou a chave da API.
     pub claude: bool,
+    /// A credencial do Claude gravada é uma chave da API.
+    pub anthropic_key: bool,
     pub openai: bool,
     pub tracker: bool,
     pub codex_login: bool,

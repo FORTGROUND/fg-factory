@@ -10,7 +10,7 @@ mod model;
 
 use eframe::egui::{self, Color32, RichText};
 use host::Host;
-use model::{Agent, Answers, Check, CodexLogin, LineKind, LogLine, RepoList, RunnerStatus, StatusPage};
+use model::{AiForm, Agent, Answers, Check, CodexLogin, LineKind, LogLine, RepoForm, RepoList, RunnerStatus, StatusPage};
 use std::time::{Duration, Instant};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread;
@@ -87,6 +87,7 @@ enum Msg {
     ActionDone(Result<String, String>),
     Repos(Result<RepoList, String>),
     AutoDone(Result<String, String>),
+    SettingsSaved(Result<String, String>),
 }
 
 /// Os repositórios com o workflow e a chave do disparo automático (FACTORY_AUTO).
@@ -98,11 +99,16 @@ struct Repos {
     requested: bool,
     acting: Option<String>,
     message: Option<Result<String, String>>,
+    /// O repositório aberto no editor e o formulário dele.
+    selected: Option<String>,
+    form: RepoForm,
+    saving: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Tab {
     Runners,
+    Repos,
     Setup,
 }
 
@@ -347,17 +353,47 @@ impl App {
         });
     }
 
-    /// Cada repositório com o workflow e a chave do disparo automático, que grava FACTORY_AUTO nele.
-    fn repos_card(&mut self, ui: &mut egui::Ui) {
+    fn save_settings(&mut self, repository: String, settings: serde_json::Value) {
+        let Some(dir) = self.dir.clone() else { return };
+        if self.repos.saving {
+            return;
+        }
+        self.repos.saving = true;
+        self.repos.message = None;
+        let setup = format!("bash {}", shell_quote(&format!("{dir}/setup.sh")));
+        let (host, tx, ctx) = (self.host, self.tx.clone(), self.ctx.clone());
+        thread::spawn(move || {
+            let lines = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+            let sink = lines.clone();
+            let ok = host.stream(&format!("{setup} --repo-settings {}", shell_quote(&repository)), Some(format!("{settings}\n")), move |l| {
+                if let Ok(mut v) = sink.lock() {
+                    v.push(l);
+                }
+            });
+            let lines = lines.lock().map(|v| v.clone()).unwrap_or_default();
+            let ok_line = lines.iter().rev().find_map(|l| l.strip_prefix("::ok::").map(str::to_owned));
+            let fail_line = lines.iter().rev().find_map(|l| l.strip_prefix("::fail::").or_else(|| l.strip_prefix("Erro: ")).map(str::to_owned));
+            let result = if ok { Ok(ok_line.unwrap_or_else(|| "Gravado.".into())) } else { Err(fail_line.unwrap_or_else(|| "Não consegui gravar a configuração.".into())) };
+            let _ = tx.send(Msg::SettingsSaved(result));
+            ctx.request_repaint();
+        });
+    }
+
+    /// A aba Repositórios: tudo o que vale por repositório. O disparo automático (FACTORY_AUTO) e a
+    /// configuração da IA (FACTORY_SETTINGS): quem corrige e quem revisa, modelo, raciocínio, modo
+    /// rápido, revisor e merge.
+    fn repos_view(&mut self, ui: &mut egui::Ui) {
         if !self.repos.requested {
             self.load_repos();
         }
         let mut toggle: Option<(String, bool)> = None;
+        let mut open: Option<String> = None;
         let mut reload = false;
-        card(ui, "Repositórios: disparo automático", |ui| {
-            ui.label(RichText::new("Ligado, toda issue nova que o FG Tracker abre no repositório vai sozinha para a factory. Desligado, só roda o que você disparar à mão (Actions, Factory, Run workflow) e as respostas a issues que esperam uma pessoa. Cada execução é uma sessão do agente na sua conta.").color(MUTED));
+        let list = self.repos.list.clone();
+        card(ui, "Repositórios com o workflow da factory", |ui| {
+            ui.label(RichText::new("O que vale para cada repositório, em qualquer máquina: o disparo automático e a IA. Fica gravado no próprio repositório do GitHub.").color(MUTED));
             ui.add_space(6.0);
-            match &self.repos.list {
+            match &list {
                 None if self.repos.error.is_none() => {
                     ui.horizontal(|ui| {
                         ui.spinner();
@@ -369,22 +405,30 @@ impl App {
                     ui.label(format!("Nenhum repositório de {} tem o workflow da factory ainda.", list.org));
                 }
                 Some(list) => {
-                    egui::Grid::new("repos").num_columns(2).spacing([16.0, 6.0]).show(ui, |ui| {
+                    egui::Grid::new("repos").num_columns(4).spacing([14.0, 8.0]).show(ui, |ui| {
                         for repo in &list.repos {
-                            ui.label(RichText::new(&repo.repository).monospace());
+                            let custom = repo.settings.as_object().is_some_and(|o| !o.is_empty());
+                            ui.label(RichText::new(&repo.repository).monospace().color(Color32::WHITE));
                             if repo.workflow == "main" {
                                 let mut on = repo.auto;
-                                let acting = self.repos.acting.as_deref() == Some(repo.repository.as_str());
                                 ui.horizontal(|ui| {
-                                    if ui.add_enabled(self.repos.acting.is_none(), egui::Checkbox::new(&mut on, if repo.auto { "Automático ligado" } else { "Automático desligado" })).changed() {
+                                    if ui.add_enabled(self.repos.acting.is_none(), egui::Checkbox::new(&mut on, "Automático")).changed() {
                                         toggle = Some((repo.repository.clone(), on));
                                     }
-                                    if acting {
+                                    if self.repos.acting.as_deref() == Some(repo.repository.as_str()) {
                                         ui.spinner();
                                     }
                                 });
+                                let selected = self.repos.selected.as_deref() == Some(repo.repository.as_str());
+                                ui.label(if custom { RichText::new("IA personalizada").color(ACCENT) } else { RichText::new("IA padrão").color(MUTED) });
+                                let button = egui::Button::new("Editar").selected(selected);
+                                if ui.add(button).clicked() {
+                                    open = Some(repo.repository.clone());
+                                }
                             } else {
-                                ui.label(RichText::new("O workflow está num PR esperando o merge").color(WARN));
+                                ui.label(RichText::new("Esperando o merge").color(WARN)).on_hover_text("O workflow da factory ainda está num pull request: depois do merge, o repositório aparece aqui para configurar.");
+                                ui.label("");
+                                ui.label("");
                             }
                             ui.end_row();
                         }
@@ -394,6 +438,79 @@ impl App {
             if let Some(error) = &self.repos.error {
                 ui.label(RichText::new(error).color(DANGER));
             }
+            reload = !self.repos.loading && anchor(ui, "Ler de novo", "Procura os repositórios outra vez");
+            ui.add_space(4.0);
+            ui.label(RichText::new("Automático ligado: toda issue nova que o FG Tracker abre no repositório vai sozinha para a factory. Desligado: só roda o que você disparar à mão (Actions, Factory, Run workflow) e as respostas a issues que esperam uma pessoa. Cada execução é uma sessão do agente na sua conta.").color(MUTED));
+        });
+        if let Some(repository) = open {
+            let settings = list.as_ref().and_then(|l| l.repos.iter().find(|r| r.repository == repository)).map(|r| r.settings.clone()).unwrap_or_default();
+            self.repos.form = RepoForm::from_json(&settings);
+            self.repos.selected = Some(repository);
+            self.repos.message = None;
+        }
+        if let Some((repository, on)) = toggle {
+            self.set_auto(repository, on);
+        }
+        if reload {
+            self.load_repos();
+        }
+        self.repo_editor(ui);
+        if let Some(message) = self.repos.message.clone().filter(|_| self.repos.selected.is_none()) {
+            ui.label(RichText::new(message.clone().unwrap_or_else(|e| e)).color(if message.is_ok() { ACCENT } else { DANGER }));
+        }
+    }
+
+    /// O editor da IA de um repositório.
+    fn repo_editor(&mut self, ui: &mut egui::Ui) {
+        let Some(repository) = self.repos.selected.clone() else { return };
+        let mut save = false;
+        let mut reset = false;
+        let mut close = false;
+        let saving = self.repos.saving;
+        card(ui, &format!("IA de {repository}"), |ui| {
+            let f = &mut self.repos.form;
+            ui.label(RichText::new("Vazio ou \"padrão\" = segue a configuração central (FORTGROUND/ci) e, por fim, a da máquina que pegar a tarefa.").color(MUTED));
+            ui.add_space(6.0);
+            ui.label(RichText::new("Quem corrige").strong());
+            ui.horizontal(|ui| {
+                ui.radio_value(&mut f.agent, String::new(), "O que a máquina declarar");
+                ui.radio_value(&mut f.agent, "claude".to_owned(), "Claude Code");
+                ui.radio_value(&mut f.agent, "codex".to_owned(), "Codex");
+            });
+            ai_rows(ui, "fix", &mut f.fix, &f.agent.clone(), "padrão");
+            ui.add_space(8.0);
+            ui.label(RichText::new("Quem revisa").strong());
+            ui.checkbox(&mut f.review_enabled, "Revisor independente antes do PR");
+            if f.review_enabled {
+                ui.horizontal(|ui| {
+                    ui.radio_value(&mut f.review_agent, String::new(), "O mesmo de quem corrige");
+                    ui.radio_value(&mut f.review_agent, "claude".to_owned(), "Claude Code");
+                    ui.radio_value(&mut f.review_agent, "codex".to_owned(), "Codex");
+                });
+                let shown = if f.review_agent.is_empty() { f.agent.clone() } else { f.review_agent.clone() };
+                ui.label(RichText::new("\"igual\" = o mesmo modelo, raciocínio e modo rápido de quem corrige.").color(MUTED));
+                ai_rows(ui, "review", &mut f.review, &shown, "igual");
+            }
+            ui.add_space(8.0);
+            ui.label(RichText::new("Depois do PR").strong());
+            ui.add_enabled_ui(f.review_enabled, |ui| {
+                ui.checkbox(&mut f.merge, "Merge automático quando a validação, o revisor e os checks do PR passam");
+            });
+            if f.merge && f.review_enabled {
+                ui.label(RichText::new("Num repositório em que o merge na branch principal faz deploy, isso é mudança em produção sem ninguém olhar.").color(WARN));
+            }
+            if !f.review_enabled {
+                f.merge = false;
+            }
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                save = ui.add_enabled(!saving, egui::Button::new(RichText::new("Salvar").strong().color(BG)).fill(ACCENT)).clicked();
+                reset = ui.add_enabled(!saving, egui::Button::new("Voltar ao padrão")).clicked();
+                close = ui.button("Fechar").clicked();
+                if saving {
+                    ui.spinner();
+                }
+            });
             match &self.repos.message {
                 Some(Ok(text)) => {
                     ui.label(RichText::new(text).color(ACCENT));
@@ -403,13 +520,16 @@ impl App {
                 }
                 None => {}
             }
-            reload = !self.repos.loading && anchor(ui, "Ler de novo", "Procura os repositórios outra vez");
         });
-        if let Some((repository, on)) = toggle {
-            self.set_auto(repository, on);
-        }
-        if reload {
-            self.load_repos();
+        if save {
+            let settings = self.repos.form.to_json();
+            self.save_settings(repository, settings);
+        } else if reset {
+            self.repos.form = RepoForm::default();
+            self.save_settings(repository, serde_json::json!({}));
+        } else if close {
+            self.repos.selected = None;
+            self.repos.message = None;
         }
     }
 
@@ -531,6 +651,11 @@ impl App {
                         }
                         Err(e) => self.repos.error = Some(e),
                     }
+                }
+                Msg::SettingsSaved(result) => {
+                    self.repos.saving = false;
+                    self.repos.message = Some(result);
+                    self.load_repos();
                 }
                 Msg::AutoDone(result) => {
                     self.repos.acting = None;
@@ -663,11 +788,16 @@ impl App {
         if self.dir.is_some() {
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.tab, Tab::Runners, RichText::new("Runners").strong());
-                ui.selectable_value(&mut self.tab, Tab::Setup, RichText::new("Configurar").strong());
+                ui.selectable_value(&mut self.tab, Tab::Repos, RichText::new("Repositórios").strong());
+                ui.selectable_value(&mut self.tab, Tab::Setup, RichText::new("Configurar esta máquina").strong());
             });
             ui.add_space(8.0);
             if self.tab == Tab::Runners {
                 self.watcher_view(ui);
+                return;
+            }
+            if self.tab == Tab::Repos {
+                self.repos_view(ui);
                 return;
             }
         }
@@ -708,7 +838,6 @@ impl App {
         });
         self.apply_bar(ui, &check);
         self.tests_card(ui, &check);
-        self.repos_card(ui);
         self.device_code(ui);
         self.log_view(ui);
     }
@@ -1082,7 +1211,7 @@ impl App {
                         ui.add_space(6.0);
                     }
                     ui.horizontal(|ui| {
-                        go_setup = ui.button("Adicionar runners ou trocar o agente").clicked();
+                        go_setup |= ui.button("Adicionar runners ou trocar o agente").clicked();
                     });
                 }
             }
@@ -1356,6 +1485,58 @@ fn login_error(output: &str) -> String {
         .unwrap_or_else(|| "O login não terminou (a página expirou ou foi cancelada). Clique para tentar de novo.".into())
 }
 
+const CLAUDE_MODELS: [&str; 5] = ["", "opus", "sonnet", "haiku", "fable"];
+const CLAUDE_EFFORTS: [&str; 6] = ["", "low", "medium", "high", "xhigh", "max"];
+const CODEX_EFFORTS: [&str; 5] = ["", "low", "medium", "high", "xhigh"];
+
+/// Modelo, raciocínio e modo rápido de uma etapa: do Claude Code, do Codex ou dos dois (quando o
+/// agente fica a cargo da máquina). `empty` diz o que vale quando nada é escolhido.
+fn ai_rows(ui: &mut egui::Ui, id: &str, ai: &mut AiForm, agent: &str, empty: &str) {
+    let label = |v: &str| if v.is_empty() { empty.to_owned() } else { v.to_owned() };
+    egui::Grid::new(("ai", id)).num_columns(4).spacing([10.0, 6.0]).show(ui, |ui| {
+        if agent != "codex" {
+            ui.label("Claude Code");
+            egui::ComboBox::from_id_salt((id, "model")).selected_text(format!("Modelo: {}", label(&ai.model))).show_ui(ui, |ui| {
+                for m in CLAUDE_MODELS {
+                    ui.selectable_value(&mut ai.model, m.to_owned(), label(m));
+                }
+            });
+            egui::ComboBox::from_id_salt((id, "effort")).selected_text(format!("Raciocínio: {}", label(&ai.effort))).show_ui(ui, |ui| {
+                for e in CLAUDE_EFFORTS {
+                    ui.selectable_value(&mut ai.effort, e.to_owned(), label(e));
+                }
+            });
+            fast_choice(ui, (id, "fast"), &mut ai.fast, empty);
+            ui.end_row();
+        }
+        if agent != "claude" {
+            ui.label("Codex");
+            ui.add(egui::TextEdit::singleline(&mut ai.codex_model).hint_text(format!("Modelo: {empty}")).desired_width(170.0));
+            egui::ComboBox::from_id_salt((id, "codex-effort")).selected_text(format!("Raciocínio: {}", label(&ai.codex_effort))).show_ui(ui, |ui| {
+                for e in CODEX_EFFORTS {
+                    ui.selectable_value(&mut ai.codex_effort, e.to_owned(), label(e));
+                }
+            });
+            fast_choice(ui, (id, "codex-fast"), &mut ai.codex_fast, empty);
+            ui.end_row();
+        }
+    });
+}
+
+/// Modo rápido: padrão (não define), ligado ou desligado.
+fn fast_choice(ui: &mut egui::Ui, id: (&str, &str), fast: &mut Option<bool>, empty: &str) {
+    let text = |v: Option<bool>| match v {
+        None => format!("Rápido: {empty}"),
+        Some(true) => "Rápido: ligado".to_owned(),
+        Some(false) => "Rápido: desligado".to_owned(),
+    };
+    egui::ComboBox::from_id_salt(id).selected_text(text(*fast)).show_ui(ui, |ui| {
+        for v in [None, Some(true), Some(false)] {
+            ui.selectable_value(fast, v, text(v));
+        }
+    });
+}
+
 fn card(ui: &mut egui::Ui, title: &str, body: impl FnOnce(&mut egui::Ui)) {
     egui::Frame::new()
         .fill(PANEL)
@@ -1457,6 +1638,8 @@ fn style(ctx: &egui::Context) {
         style.visuals.selection.bg_fill = ACCENT.linear_multiply(0.35);
         style.visuals.selection.stroke = egui::Stroke::new(1.0, ACCENT);
         style.visuals.hyperlink_color = ACCENT;
+        // Botões, abas, caixas de marcar e opções mostram a mão ao passar o mouse.
+        style.visuals.interact_cursor = Some(egui::CursorIcon::PointingHand);
         style.visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, ACCENT);
         style.spacing.item_spacing = egui::vec2(8.0, 6.0);
         style.spacing.button_padding = egui::vec2(10.0, 5.0);

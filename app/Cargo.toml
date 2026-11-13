@@ -1,6 +1,6 @@
 [package]
 name = "fg-factory-setup"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2024"
 description = "Configura os runners do FG Factory numa máquina: macOS, Linux ou Windows com WSL."
 license = "MIT"
@@ -11,7 +11,7 @@ name = "fg-factory-setup"
 path = "src/main.rs"
 
 [dependencies]
-eframe = { version = "0.37", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
+eframe = { version = "0.37", default-features = false, features = ["clipboard", "default_fonts", "glow", "wayland", "x11"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

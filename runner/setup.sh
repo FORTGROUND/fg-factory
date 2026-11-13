@@ -19,6 +19,8 @@
 #   bash setup.sh --pause runnerN | --resume runnerN | --remove runnerN
 #   bash setup.sh --repos         os repositórios com o workflow da factory e se o automático está ligado
 #   bash setup.sh --auto <repo> on|off   liga ou desliga o disparo automático (FACTORY_AUTO) no repositório
+#   bash setup.sh --repo-settings <repo>  grava a configuração da IA do repositório (FACTORY_SETTINGS),
+#                                         lida em JSON da entrada; `{}` volta para a configuração central
 #
 # Rodar de novo é seguro: o que fica em branco mantém o valor gravado.
 #
@@ -366,8 +368,42 @@ repo_line() {  # repo_line <dono/nome> -> uma linha JSON
   if ! gh api "repos/$repo/contents/.github/workflows/factory.yml" --silent >/dev/null 2>&1; then
     if gh api "repos/$repo/contents/.github/workflows/factory.yml?ref=factory-workflow" --silent >/dev/null 2>&1; then workflow=pr; else return 0; fi
   fi
-  auto="$(gh api "repos/$repo/actions/variables/FACTORY_AUTO" --jq .value 2>/dev/null || true)"
-  jq -nc --arg repo "$repo" --arg workflow "$workflow" --arg auto "$auto" '{repository: $repo, workflow: $workflow, auto: ($auto == "true")}'
+  auto="$(gh api "repos/$repo/actions/variables/FACTORY_AUTO" --jq .value 2>/dev/null)" || auto=""
+  settings="$(gh api "repos/$repo/actions/variables/FACTORY_SETTINGS" --jq .value 2>/dev/null)" || settings='{}'
+  jq -e 'type == "object"' >/dev/null 2>&1 <<< "$settings" || settings='{}'
+  jq -nc --arg repo "$repo" --arg workflow "$workflow" --arg auto "$auto" --argjson settings "$settings" \
+    '{repository: $repo, workflow: $workflow, auto: ($auto == "true"), settings: $settings}'
+}
+
+# A configuração da IA de um repositório: quem corrige e quem revisa, modelo, raciocínio, modo
+# rápido, revisor e merge. Fica na variável FACTORY_SETTINGS do repositório, que o workflow
+# central (FORTGROUND/ci, factory-settings.yml) lê por cima da configuração dele.
+set_repo_settings() {
+  local repo="$1" org settings; org="$(default_org)"
+  case "$repo" in */*) ;; '') fail "informe o repositório." ;; *) repo="$org/$repo" ;; esac
+  [[ "$repo" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || fail "repositório inválido: '$repo'."
+  settings="$(cat)"
+  settings="$(jq -c 'if type == "object" then . else error("não é um objeto") end
+    | del(..|nulls) | walk(if type == "object" then with_entries(select(.value != "" and .value != {})) else . end)' <<< "$settings" 2>/dev/null)" \
+    || fail "configuração inválida (precisa ser um objeto JSON)."
+  jq -e '
+    def name: type == "string" and test("^[A-Za-z0-9._:/\\[\\]-]{1,100}$");
+    def level: type == "string" and test("^[a-z]{1,20}$");
+    def agent: . == "claude" or . == "codex";
+    def ai: (.model == null or (.model | name)) and (.effort == null or (.effort | level)) and (.fast == null or (.fast | type == "boolean"))
+      and (.codex == null or ((.codex | type == "object") and (.codex.model == null or (.codex.model | name))
+        and (.codex.effort == null or (.codex.effort | level)) and (.codex.fast == null or (.codex.fast | type == "boolean"))));
+    ai and (.agent == null or (.agent | agent)) and (.merge == null or (.merge | type == "boolean"))
+    and (.review == null or ((.review | type == "object") and (.review | ai) and (.review.agent == null or (.review.agent | agent))
+      and (.review.enabled == null or (.review.enabled | type == "boolean"))))' >/dev/null <<< "$settings" \
+    || fail "configuração com valor inválido (agente claude ou codex, modelo sem espaços, raciocínio em letras minúsculas)."
+  if [ "$settings" = '{}' ]; then
+    gh variable delete FACTORY_SETTINGS --repo "$repo" >/dev/null 2>&1 || true
+    say "::ok::$repo volta a seguir a configuração central."
+  else
+    gh variable set FACTORY_SETTINGS --body "$settings" --repo "$repo" >/dev/null 2>&1 || fail "não consegui gravar a configuração em $repo (precisa de admin no repositório)."
+    say "::ok::Configuração da IA gravada em $repo; vale na próxima execução."
+  fi
 }
 list_repos() {
   local org; org="$(default_org)"
@@ -730,6 +766,7 @@ case "${1:-}" in
   --remove) ensure_env; remove_runner "${2:-}" ;;
   --repos) ensure_env; list_repos ;;
   --auto) ensure_env; set_auto "${2:-}" "${3:-}" ;;
+  --repo-settings) ensure_env; set_repo_settings "${2:-}" ;;
   --apply) ensure_env; from_stdin; apply ;;
   '') ensure_env; interactive; apply ;;
   *) fail "opção desconhecida: $1 (veja o começo do setup.sh)" ;;

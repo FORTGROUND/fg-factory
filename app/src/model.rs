@@ -482,6 +482,118 @@ pub struct RepoAuto {
     /// main (o workflow está na branch principal) ou pr (ainda no pull request).
     pub workflow: String,
     pub auto: bool,
+    /// A configuração da IA gravada no repositório (FACTORY_SETTINGS); `{}` = a central.
+    pub settings: serde_json::Value,
+}
+
+/// Modelo, raciocínio e modo rápido de uma etapa, no Claude Code e no Codex. Vazio = não define
+/// aqui (vale a configuração central, a da máquina ou, no revisor, a de quem corrige).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct AiForm {
+    pub model: String,
+    pub effort: String,
+    pub fast: Option<bool>,
+    pub codex_model: String,
+    pub codex_effort: String,
+    pub codex_fast: Option<bool>,
+}
+
+/// A configuração da IA de um repositório, como o formulário da aba Repositórios a edita.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RepoForm {
+    /// "" (o que a máquina declarar), "claude" ou "codex".
+    pub agent: String,
+    pub fix: AiForm,
+    pub review_enabled: bool,
+    /// "" (o mesmo de quem corrige), "claude" ou "codex".
+    pub review_agent: String,
+    pub review: AiForm,
+    pub merge: bool,
+}
+
+impl Default for RepoForm {
+    fn default() -> Self {
+        RepoForm { agent: String::new(), fix: AiForm::default(), review_enabled: true, review_agent: String::new(), review: AiForm::default(), merge: false }
+    }
+}
+
+fn text(v: &serde_json::Value, key: &str) -> String {
+    v.get(key).and_then(|x| x.as_str()).unwrap_or_default().to_owned()
+}
+
+impl AiForm {
+    fn from_json(v: &serde_json::Value) -> Self {
+        let codex = v.get("codex").cloned().unwrap_or_default();
+        AiForm {
+            model: text(v, "model"),
+            effort: text(v, "effort"),
+            fast: v.get("fast").and_then(|x| x.as_bool()),
+            codex_model: text(&codex, "model"),
+            codex_effort: text(&codex, "effort"),
+            codex_fast: codex.get("fast").and_then(|x| x.as_bool()),
+        }
+    }
+    fn write(&self, out: &mut serde_json::Map<String, serde_json::Value>) {
+        use serde_json::{Value, json};
+        let put = |out: &mut serde_json::Map<String, Value>, key: &str, value: &str| {
+            if !value.trim().is_empty() {
+                out.insert(key.into(), json!(value.trim()));
+            }
+        };
+        put(out, "model", &self.model);
+        put(out, "effort", &self.effort);
+        if let Some(fast) = self.fast {
+            out.insert("fast".into(), json!(fast));
+        }
+        let mut codex = serde_json::Map::new();
+        put(&mut codex, "model", &self.codex_model);
+        put(&mut codex, "effort", &self.codex_effort);
+        if let Some(fast) = self.codex_fast {
+            codex.insert("fast".into(), json!(fast));
+        }
+        if !codex.is_empty() {
+            out.insert("codex".into(), Value::Object(codex));
+        }
+    }
+}
+
+impl RepoForm {
+    pub fn from_json(v: &serde_json::Value) -> Self {
+        let review = v.get("review").cloned().unwrap_or_default();
+        RepoForm {
+            agent: text(v, "agent"),
+            fix: AiForm::from_json(v),
+            review_enabled: review.get("enabled").and_then(|x| x.as_bool()).unwrap_or(true),
+            review_agent: text(&review, "agent"),
+            review: AiForm::from_json(&review),
+            merge: v.get("merge").and_then(|x| x.as_bool()).unwrap_or(false),
+        }
+    }
+
+    /// Só o que difere do padrão vai para a variável: o resto continua vindo da configuração central.
+    pub fn to_json(&self) -> serde_json::Value {
+        use serde_json::{Value, json};
+        let mut out = serde_json::Map::new();
+        if !self.agent.is_empty() {
+            out.insert("agent".into(), json!(self.agent));
+        }
+        self.fix.write(&mut out);
+        let mut review = serde_json::Map::new();
+        if !self.review_enabled {
+            review.insert("enabled".into(), json!(false));
+        }
+        if !self.review_agent.is_empty() {
+            review.insert("agent".into(), json!(self.review_agent));
+        }
+        self.review.write(&mut review);
+        if !review.is_empty() {
+            out.insert("review".into(), Value::Object(review));
+        }
+        if self.merge {
+            out.insert("merge".into(), json!(true));
+        }
+        Value::Object(out)
+    }
 }
 
 pub fn parse_repos(text: &str) -> Result<RepoList, String> {
@@ -513,6 +625,16 @@ mod status_tests {
         let attention = parse_status(r#"{"runners":[{"service":"runner1","running":true,"state":"attention","problems":["sem as credenciais guardadas"]}]}"#).unwrap();
         assert_eq!(attention.runners[0].state_label(), "Precisa de configuração");
         assert_eq!(attention.runners[0].problems, ["sem as credenciais guardadas"]);
+        let form = RepoForm::from_json(&serde_json::json!({"agent": "codex", "codex": {"model": "gpt-x", "fast": true},
+            "review": {"agent": "claude", "model": "opus", "effort": "xhigh"}, "merge": true}));
+        assert_eq!((form.agent.as_str(), form.fix.codex_model.as_str(), form.fix.codex_fast), ("codex", "gpt-x", Some(true)));
+        assert_eq!((form.review_agent.as_str(), form.review.model.as_str(), form.review_enabled, form.merge), ("claude", "opus", true, true));
+        assert_eq!(RepoForm::from_json(&form.to_json()), form, "ida e volta");
+        assert_eq!(RepoForm::default().to_json(), serde_json::json!({}), "o padrão não grava nada");
+        let mut off = RepoForm::default();
+        off.review_enabled = false;
+        off.fix.model = "  ".into();
+        assert_eq!(off.to_json(), serde_json::json!({"review": {"enabled": false}}));
         let repos = parse_repos(r#"{"org":"FORTGROUND","repos":[{"repository":"FORTGROUND/a","workflow":"main","auto":true},{"repository":"FORTGROUND/b","workflow":"pr","auto":false}]}"#).unwrap();
         assert_eq!((repos.repos[0].auto, repos.repos[1].workflow.as_str()), (true, "pr"));
     }

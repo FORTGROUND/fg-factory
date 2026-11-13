@@ -56,7 +56,7 @@ a **uma organização**; sem isso o FG Tracker recusa os relatos.
 Elas podem ficar em dois lugares. Escolha um:
 
 **No runner (uma vez por máquina, vale para todos os repositórios).** Para runners próprios em
-contêiner: o `bash setup.sh` de [Runners próprios](#runners-próprios) pede as duas numa janela do
+contêiner: o app FG Factory Setup (ou o `bash setup.sh`) de [Runners próprios](#configurar-uma-máquina-passo-a-passo) pede as duas numa janela do
 sistema e as entrega a todos os runners da máquina. Todo repositório atendido por eles funciona só
 com o `factory.yml`, sem segredos. Veja [Credenciais no runner](#credenciais-no-runner).
 
@@ -181,37 +181,69 @@ que vem de fora. O que protege a produção é ele não ter o que usar: sem cred
 sem URL de banco, sem chaves SSH, sem `.env` de produção. O primeiro passo de todo job confere
 isso e recusa a máquina se achar algo.
 
-### Em contêiner (macOS, Linux, Windows com WSL)
+### Configurar uma máquina (passo a passo)
 
-O jeito recomendado: o contêiner não monta nada da máquina, então dá para usar um notebook de
-uso misto sem tirar as suas credenciais dele.
+Os runners rodam em contêiner: o contêiner não monta nada da máquina, então dá para usar um
+notebook de uso misto sem tirar as suas credenciais dele. Uma configuração por máquina serve a
+todos os repositórios da organização que têm o workflow.
 
-| Sistema | O que instalar antes |
+**1. Instale o Docker.**
+
+| Sistema | O que instalar |
 | --- | --- |
-| macOS | Docker Desktop |
+| macOS | [Docker Desktop](https://www.docker.com/products/docker-desktop/) |
+| Windows | [WSL com o Ubuntu](https://learn.microsoft.com/windows/wsl/install) (`wsl --install` no PowerShell) e o Docker Desktop com a integração do WSL ligada (Settings → Resources → WSL integration) |
 | Linux | Docker Engine com o plugin Compose |
-| Windows | Docker Desktop com a integração WSL; rode os comandos dentro do WSL |
 
-1. Instale o `gh` e entre com uma conta owner da organização (`gh auth login`).
-2. Clone este repositório na máquina e rode, em `runner/`:
-   ```sh
-   bash setup.sh
-   ```
+Deixe o Docker Desktop aberto. Se quiser rodar mais de um runner, dê a ele núcleos e memória em
+Settings → Resources: o app sugere quantos runners cabem pelo que o Docker tem.
 
-O `setup.sh` faz tudo de uma vez, e rodar de novo é seguro (Enter mantém o que já está gravado):
+**2. Baixe o app FG Factory Setup** da [página de releases](https://github.com/FORTGROUND/fg-factory/releases/latest):
 
-- pergunta o nome da máquina, **quantas tarefas ao mesmo tempo** (um runner por tarefa, até 4),
-  qual agente usar (Claude Code ou Codex) e se os testes podem subir contêineres;
-- pede as credenciais numa **janela do sistema** (Windows pelo WSL, macOS, ou Linux com
-  `zenity`; sem janela, no terminal), sem mostrar o que é digitado. Digitadas uma vez, valem para
-  todos os runners da máquina;
-- registra os runners na organização (o token de registro sai do `gh`) e os sobe;
-- com o Codex pela assinatura do ChatGPT, faz o login uma vez para todos os runners;
-- confere que os runners ficaram online e oferece apagar segredos de repositório antigos, que
-  passariam por cima das credenciais da máquina.
+| Sistema | Arquivo | Como abrir |
+| --- | --- | --- |
+| macOS (Apple Silicon e Intel) | `fg-factory-setup-macos.zip` | Descompacte e arraste para Aplicativos. Na primeira vez, clique com o botão direito → Abrir (o app não é assinado pela Apple). |
+| Windows | `fg-factory-setup-windows.zip` | Descompacte e abra o `.exe`. Se o SmartScreen avisar, Mais informações → Executar assim mesmo. Ele usa o WSL: o Ubuntu precisa estar instalado. |
+| Linux | `fg-factory-setup-linux-x86_64.tar.gz` | Descompacte e rode `./fg-factory-setup`. |
 
-Para mais tarefas ao mesmo tempo, outro agente ou um token novo, rode `bash setup.sh` de novo.
-Cada tarefa simultânea é uma sessão do agente a mais na sua conta e mais CPU e memória na máquina.
+**3. Siga a tela.** O app:
+
+1. confere o Docker, o git, o `gh` e o `jq`. Instala o `gh` e o `jq` sem pedir senha de
+   administrador e, se o `gh` não estiver logado, mostra o código para entrar no GitHub pelo
+   navegador. A conta precisa ser **owner** da organização: é ela que registra os runners;
+2. baixa este repositório em `~/.fg-factory/fg-factory` (ou usa a pasta dos runners que já rodam
+   na máquina);
+3. pergunta a organização, o nome da máquina e **quantas tarefas ao mesmo tempo**, com uma
+   sugestão pelo que o Docker tem (cada runner chega a uns 3 núcleos e 6 GB num build pesado);
+4. pergunta **quem corrige** e **quem revisa**: Claude Code ou Codex, cada etapa com o seu;
+5. pede só as credenciais que essas escolhas usam:
+   - **Claude Code:** o token de `claude setup-token` (rode no terminal; abre o navegador) ou
+     uma chave da API da Anthropic;
+   - **Codex:** o login da assinatura do ChatGPT (o app mostra um código para digitar no
+     navegador) ou uma chave da API da OpenAI;
+   - **FG Tracker:** um token criado no painel em Conta → Tokens de acesso, modelo **FG
+     Factory**, restrito à organização. O botão "Abrir" leva à página;
+6. em "Configurar esta máquina": grava as credenciais no `.env` dos runners (só o seu usuário
+   lê), registra os runners na organização pelo `gh`, monta a imagem, sobe os runners e confere
+   que ficaram online. Se você deixar marcado, apaga segredos antigos dos repositórios que
+   passariam por cima destas credenciais.
+
+Para mudar algo depois (mais runners, outro agente, um token novo), abra o app de novo: o que
+fica em branco mantém o que já está gravado.
+
+**Sem o app.** O app é uma interface para o `runner/setup.sh`, que faz o mesmo no terminal:
+
+```sh
+git clone https://github.com/FORTGROUND/fg-factory.git && cd fg-factory/runner
+bash setup.sh
+```
+
+Ele pergunta no terminal e pede os segredos numa janela do sistema (ou no terminal, sem
+mostrar o que é digitado). `bash setup.sh --check` mostra, em JSON, o que a máquina tem.
+
+**4. Ligue o automático em cada repositório** quando quiser: a variável `FACTORY_AUTO=true`
+(passo 5 do [Passo a passo](#5-teste-em-uma-issue-e-ligue-o-automático)). Até lá, só roda o que
+você disparar à mão e as respostas a issues que esperam uma pessoa.
 
 A imagem traz git, gh, jq, Node, pnpm, bun, Rust, ffmpeg, o Claude Code e o Codex. Se o seu `validate` precisa de
 outra coisa (Python, Go, Java), acrescente ao `runner/Dockerfile` e reconstrua.
@@ -221,7 +253,7 @@ outra coisa (Python, Go, Java), acrescente ao `runner/Dockerfile` e reconstrua.
 | Ver se estão rodando | `docker compose ps` |
 | Ver o que um runner faz | `docker compose logs -f runner1` |
 | Pausar a máquina | `docker compose stop` |
-| Atualizar as ferramentas | `docker compose build --pull && docker compose up -d runner1` |
+| Atualizar as ferramentas | Abra o app de novo e configure (a imagem é remontada) |
 | Tirar a máquina da factory | `docker compose down -v` e remova os runners no GitHub |
 
 Notebook que dorme sai da fila enquanto dorme; o job espera outro runner por até 24 h.
@@ -328,7 +360,7 @@ saída da sessão do Claude Code enquanto ela roda, ligue no `with:` do `factory
 
 ### Runners
 
-Só para runners em contêiner: com o token no `.env` da máquina (`bash setup.sh`),
+Só para runners em contêiner: com o token no `.env` da máquina (o app FG Factory Setup),
 cada runner envia um sinal a cada 30 segundos. Sem sinal por 2 minutos, o painel mostra o
 runner como offline.
 
@@ -403,7 +435,7 @@ repositório. O que muda:
   execução da factory, mas só para o repositório que os gravou.
 - Por isso: registre o runner só com o rótulo `factory` (é o padrão), use-o só em repositórios
   privados da sua organização e não deixe workflows de terceiros rodarem nele.
-- Trocar ou tirar: `bash setup.sh` de novo, ou apague as linhas do `.env` e suba os
+- Trocar ou tirar: abra o app (ou `bash setup.sh`) de novo, ou apague as linhas do `.env` e suba os
   runners outra vez.
 
 ## Ajustes
@@ -464,10 +496,10 @@ padrão da conta):
 
 **Credencial do Codex**, uma das duas:
 
-- **Assinatura do ChatGPT:** o `bash setup.sh` faz o login: o Codex mostra um endereço e um
+- **Assinatura do ChatGPT:** o app FG Factory Setup faz o login: o Codex mostra um endereço e um
   código para você confirmar no navegador. Um login só serve a todos os runners da máquina, fica
   num volume dela e se renova sozinho.
-- **Chave da API da OpenAI:** o `bash setup.sh` a pede numa janela, ou o segredo
+- **Chave da API da OpenAI:** o app a pede, ou o segredo
   `FACTORY_OPENAI_API_KEY` do repositório.
 
 O comentário da issue, o resumo da execução e o painel do FG Tracker dizem qual CLI e qual modelo

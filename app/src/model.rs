@@ -403,3 +403,84 @@ mod tests {
         assert!(a.problems(&logged).is_empty());
     }
 }
+
+/// O que os runners desta máquina estão fazendo (`setup.sh --status`).
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct StatusPage {
+    pub org: String,
+    pub runners: Vec<RunnerStatus>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct RunnerStatus {
+    pub service: String,
+    pub name: String,
+    pub running: bool,
+    pub online: bool,
+    /// paused, idle, working ou offline.
+    pub state: String,
+    pub repository: String,
+    pub issue: Option<u64>,
+    pub title: String,
+    /// setup, agent, validate, review ou publish.
+    pub step: String,
+    pub run_id: String,
+    pub agent: String,
+    pub review_agent: String,
+    pub log_lines: u64,
+}
+
+impl RunnerStatus {
+    pub fn state_label(&self) -> &'static str {
+        match self.state.as_str() {
+            "paused" => "Pausado",
+            "working" => "Trabalhando",
+            "idle" => "Livre",
+            _ => "Sem sinal do GitHub",
+        }
+    }
+
+    /// A etapa da tarefa, com o agente que roda nela.
+    pub fn step_label(&self) -> Option<String> {
+        let agent = |a: &str| if a == "codex" { "Codex" } else { "Claude Code" };
+        Some(match self.step.as_str() {
+            "setup" => "Preparando o repositório".to_owned(),
+            "agent" => format!("Corrigindo ({})", agent(&self.agent)),
+            "validate" => "Validando a correção".to_owned(),
+            "review" => format!("Revisando ({})", agent(&self.review_agent)),
+            "publish" => "Publicando".to_owned(),
+            _ => return None,
+        })
+    }
+
+    pub fn run_url(&self) -> Option<String> {
+        (!self.repository.is_empty() && !self.run_id.is_empty())
+            .then(|| format!("https://github.com/{}/actions/runs/{}", self.repository, self.run_id))
+    }
+}
+
+pub fn parse_status(text: &str) -> Result<StatusPage, String> {
+    let start = text.find('{').ok_or_else(|| format!("O setup.sh não respondeu como esperado:\n{}", text.trim()))?;
+    serde_json::from_str(&text[start..]).map_err(|e| format!("Resposta do setup.sh ilegível ({e})."))
+}
+
+#[cfg(test)]
+mod status_tests {
+    use super::*;
+
+    #[test]
+    fn the_status_says_what_each_runner_does() {
+        let page = parse_status(r#"{"org":"FORTGROUND","runners":[
+          {"service":"runner1","name":"factory-pc-1","running":true,"online":true,"state":"working","busy":true,
+           "repository":"FORTGROUND/gallery-backend","issue":42,"title":"Erro 500","step":"review","runId":"987","agent":"codex","reviewAgent":"claude","logLines":4},
+          {"service":"runner2","name":"factory-pc-2","running":false,"online":false,"state":"paused"}]}"#).unwrap();
+        let (working, paused) = (&page.runners[0], &page.runners[1]);
+        assert_eq!(working.state_label(), "Trabalhando");
+        assert_eq!(working.step_label().as_deref(), Some("Revisando (Claude Code)"));
+        assert_eq!(working.run_url().as_deref(), Some("https://github.com/FORTGROUND/gallery-backend/actions/runs/987"));
+        assert_eq!((paused.state_label(), paused.step_label(), paused.run_url()), ("Pausado", None, None));
+        assert!(parse_status("erro").is_err());
+    }
+}

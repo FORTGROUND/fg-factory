@@ -10,7 +10,8 @@ mod model;
 
 use eframe::egui::{self, Color32, RichText};
 use host::Host;
-use model::{Agent, Answers, Check, CodexLogin, LineKind, LogLine};
+use model::{Agent, Answers, Check, CodexLogin, LineKind, LogLine, RunnerStatus, StatusPage};
+use std::time::{Duration, Instant};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread;
 
@@ -77,6 +78,32 @@ enum Msg {
     Finished(Task, bool),
     LoginOutput(String),
     LoginEnded(bool),
+    Status(Result<StatusPage, String>),
+    Logs(String, String),
+    ActionDone(Result<String, String>),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Tab {
+    Runners,
+    Setup,
+}
+
+/// A aba Runners: o que cada runner faz, atualizado a cada poucos segundos, e o log do escolhido.
+#[derive(Default)]
+struct Watcher {
+    page: Option<StatusPage>,
+    error: Option<String>,
+    loading: bool,
+    last: Option<Instant>,
+    selected: Option<String>,
+    logs: String,
+    logs_loading: bool,
+    logs_last: Option<Instant>,
+    acting: Option<String>,
+    confirm_remove: Option<String>,
+    message: Option<Result<String, String>>,
+    tab_chosen: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -135,6 +162,8 @@ struct App {
     /// O teste dos runners, por serviço (runner1, runner2…), na ordem.
     tests: std::collections::BTreeMap<String, RunnerState>,
     tests_finished: Option<bool>,
+    tab: Tab,
+    watcher: Watcher,
 }
 
 impl App {
@@ -161,6 +190,8 @@ impl App {
             claude_api_key: false,
             tests: Default::default(),
             tests_finished: None,
+            tab: Tab::Setup,
+            watcher: Watcher::default(),
         };
         app.run(Task::Bootstrap);
         app
@@ -230,6 +261,56 @@ impl App {
         });
     }
 
+    /// O monitor relê o estado a cada 3 s e o log do runner escolhido a cada 2 s, sem travar a tela.
+    fn poll(&mut self) {
+        let Some(dir) = self.dir.clone() else { return };
+        let setup = format!("bash {}", shell_quote(&format!("{dir}/setup.sh")));
+        let due = |last: Option<Instant>, every: u64| last.is_none_or(|t| t.elapsed() >= Duration::from_secs(every));
+        let watching = self.tab == Tab::Runners || !self.watcher.tab_chosen;
+        if watching && !self.watcher.loading && self.busy != Some(Task::Apply) && due(self.watcher.last, 3) {
+            self.watcher.loading = true;
+            self.watcher.last = Some(Instant::now());
+            let (host, tx, ctx, setup) = (self.host, self.tx.clone(), self.ctx.clone(), setup.clone());
+            thread::spawn(move || {
+                let result = host.output(&format!("{setup} --status")).and_then(|t| model::parse_status(&t));
+                let _ = tx.send(Msg::Status(result));
+                ctx.request_repaint();
+            });
+        }
+        if let Some(service) = self.watcher.selected.clone().filter(|_| self.tab == Tab::Runners)
+            && !self.watcher.logs_loading && due(self.watcher.logs_last, 2) {
+                self.watcher.logs_loading = true;
+                self.watcher.logs_last = Some(Instant::now());
+                let (host, tx, ctx) = (self.host, self.tx.clone(), self.ctx.clone());
+                thread::spawn(move || {
+                    let text = host.output(&format!("{setup} --logs {service}")).unwrap_or_default();
+                    let _ = tx.send(Msg::Logs(service, host::strip_ansi(&text)));
+                    ctx.request_repaint();
+                });
+            }
+    }
+
+    /// Pausar, retomar ou remover um runner (`setup.sh --pause|--resume|--remove`).
+    fn runner_action(&mut self, action: &'static str, service: String) {
+        let Some(dir) = self.dir.clone() else { return };
+        if self.watcher.acting.is_some() {
+            return;
+        }
+        self.watcher.acting = Some(service.clone());
+        self.watcher.message = None;
+        let setup = format!("bash {}", shell_quote(&format!("{dir}/setup.sh")));
+        let (host, tx, ctx) = (self.host, self.tx.clone(), self.ctx.clone());
+        thread::spawn(move || {
+            let result = host.output(&format!("{setup} --{action} {service}")).map(|out| {
+                out.lines().rev().find_map(|l| l.strip_prefix("::ok::").map(str::to_owned)).unwrap_or_else(|| "Feito.".into())
+            }).map_err(|err| {
+                err.lines().rev().find_map(|l| l.strip_prefix("::fail::").or_else(|| l.strip_prefix("Erro: ")).map(str::to_owned)).unwrap_or(err)
+            });
+            let _ = tx.send(Msg::ActionDone(result));
+            ctx.request_repaint();
+        });
+    }
+
     /// Começa o login do Claude ou do Codex dentro do contêiner do runner.
     fn start_login(&mut self, kind: LoginKind) {
         if self.login.as_ref().is_some_and(Login::running) || self.busy == Some(Task::Apply) {
@@ -292,6 +373,37 @@ impl App {
     fn drain(&mut self) {
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
+                Msg::Status(result) => {
+                    self.watcher.loading = false;
+                    match result {
+                        Ok(page) => {
+                            // Na primeira leitura: com runners na máquina, abre direto no monitor.
+                            if !self.watcher.tab_chosen {
+                                self.watcher.tab_chosen = true;
+                                if !page.runners.is_empty() {
+                                    self.tab = Tab::Runners;
+                                }
+                            }
+                            if self.watcher.selected.as_ref().is_some_and(|s| !page.runners.iter().any(|r| &r.service == s)) {
+                                self.watcher.selected = None;
+                            }
+                            self.watcher.page = Some(page);
+                            self.watcher.error = None;
+                        }
+                        Err(e) => self.watcher.error = Some(e),
+                    }
+                }
+                Msg::Logs(service, text) => {
+                    self.watcher.logs_loading = false;
+                    if self.watcher.selected.as_deref() == Some(service.as_str()) {
+                        self.watcher.logs = text;
+                    }
+                }
+                Msg::ActionDone(result) => {
+                    self.watcher.acting = None;
+                    self.watcher.message = Some(result);
+                    self.watcher.last = None;
+                }
                 Msg::LoginOutput(text) => {
                     if let Some(login) = self.login.as_mut().filter(|l| l.running()) {
                         login.output.push_str(&text);
@@ -377,8 +489,10 @@ impl App {
 }
 
 impl eframe::App for App {
-    fn logic(&mut self, _ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.drain();
+        self.poll();
+        ctx.request_repaint_after(Duration::from_millis(700));
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -407,6 +521,17 @@ impl App {
 
     fn body(&mut self, ui: &mut egui::Ui) {
         ui.add_space(6.0);
+        if self.dir.is_some() {
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut self.tab, Tab::Runners, RichText::new("Runners").strong());
+                ui.selectable_value(&mut self.tab, Tab::Setup, RichText::new("Configurar").strong());
+            });
+            ui.add_space(8.0);
+            if self.tab == Tab::Runners {
+                self.watcher_view(ui);
+                return;
+            }
+        }
         let Some(check) = self.check.clone() else {
             if let Some(error) = self.check_error.clone() {
                 card(ui, "Algo deu errado", |ui| {
@@ -688,6 +813,164 @@ impl App {
         }
     }
 
+    /// O monitor: cada runner com o estado, a etapa, o repositório e a issue; clicar mostra o log.
+    fn watcher_view(&mut self, ui: &mut egui::Ui) {
+        let mut action: Option<(&'static str, String)> = None;
+        let mut select: Option<Option<String>> = None;
+        let mut go_setup = false;
+        let host = self.host;
+        let page = self.watcher.page.clone();
+        card(ui, "Runners desta máquina", |ui| {
+            match &page {
+                None => {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label("Lendo os runners…");
+                    });
+                }
+                Some(page) if page.runners.is_empty() => {
+                    ui.label("Nenhum runner nesta máquina ainda.");
+                    go_setup = ui.button("Configurar runners").clicked();
+                }
+                Some(page) => {
+                    ui.label(RichText::new(format!("Organização {} · atualiza sozinho a cada 3 segundos. Em Ver log, o que a IA está fazendo.", page.org)).color(MUTED));
+                    ui.add_space(6.0);
+                    for runner in &page.runners {
+                        let selected = self.watcher.selected.as_deref() == Some(runner.service.as_str());
+                        let acting = self.watcher.acting.as_deref() == Some(runner.service.as_str());
+                        let confirming = self.watcher.confirm_remove.as_deref() == Some(runner.service.as_str());
+                        let frame = egui::Frame::new()
+                            .fill(if selected { Color32::from_rgb(0x16, 0x2A, 0x2A) } else { BG })
+                            .stroke(egui::Stroke::new(1.0, if selected { ACCENT } else { BORDER }))
+                            .corner_radius(8.0)
+                            .inner_margin(egui::Margin::same(10));
+                        frame.show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.horizontal(|ui| {
+                                runner_state_icon(ui, runner);
+                                let name = ui.add(egui::Label::new(RichText::new(&runner.name).monospace().strong().color(Color32::WHITE)).sense(egui::Sense::click()));
+                                if name.clicked() {
+                                    select = Some(if selected { None } else { Some(runner.service.clone()) });
+                                }
+                                ui.label(RichText::new(runner.state_label()).color(state_color(runner)));
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    let idle = runner.state != "working";
+                                    if confirming {
+                                        if ui.add_enabled(!acting, egui::Button::new(RichText::new("Confirmar remoção").color(DANGER))).clicked() {
+                                            action = Some(("remove", runner.service.clone()));
+                                        }
+                                        if ui.button("Cancelar").clicked() {
+                                            self.watcher.confirm_remove = None;
+                                        }
+                                    } else {
+                                        let remove = ui.add_enabled(idle && !acting, egui::Button::new("Remover"));
+                                        if remove.clicked() {
+                                            self.watcher.confirm_remove = Some(runner.service.clone());
+                                        }
+                                        remove.on_disabled_hover_text("Espere a tarefa atual terminar.");
+                                        if runner.running {
+                                            let pause = ui.add_enabled(idle && !acting, egui::Button::new("Pausar"));
+                                            if pause.clicked() {
+                                                action = Some(("pause", runner.service.clone()));
+                                            }
+                                            pause.on_disabled_hover_text("Espere a tarefa atual terminar.");
+                                        } else if ui.add_enabled(!acting, egui::Button::new("Retomar")).clicked() {
+                                            action = Some(("resume", runner.service.clone()));
+                                        }
+                                    }
+                                    if ui.button(if selected { "Fechar log" } else { "Ver log" }).clicked() {
+                                        select = Some(if selected { None } else { Some(runner.service.clone()) });
+                                    }
+                                    if acting {
+                                        ui.spinner();
+                                    }
+                                });
+                            });
+                            if runner.state == "working" {
+                                ui.horizontal_wrapped(|ui| {
+                                    if let Some(step) = runner.step_label() {
+                                        ui.label(RichText::new(step).strong().color(ACCENT));
+                                    }
+                                    if !runner.repository.is_empty() {
+                                        let issue = runner.issue.map(|n| format!("#{n}")).unwrap_or_default();
+                                        ui.label(RichText::new(format!("{}{issue}", runner.repository)).monospace());
+                                    }
+                                    if !runner.title.is_empty() {
+                                        ui.label(RichText::new(&runner.title).color(MUTED));
+                                    }
+                                });
+                            } else if runner.state == "paused" {
+                                ui.label(RichText::new("Não pega tarefas até ser retomado.").color(MUTED));
+                            } else if runner.state == "offline" {
+                                ui.label(RichText::new("O contêiner roda, mas o GitHub não o vê online. Veja os detalhes em Configurar.").color(MUTED));
+                            }
+                        });
+                        ui.add_space(6.0);
+                    }
+                    ui.horizontal(|ui| {
+                        go_setup = ui.button("Adicionar runners ou trocar o agente").clicked();
+                    });
+                }
+            }
+            if let Some(error) = &self.watcher.error {
+                ui.label(RichText::new(error).color(DANGER));
+            }
+            match &self.watcher.message {
+                Some(Ok(text)) => {
+                    ui.label(RichText::new(text).color(ACCENT));
+                }
+                Some(Err(text)) => {
+                    ui.label(RichText::new(text).color(DANGER));
+                }
+                None => {}
+            }
+        });
+        if let Some(choice) = select {
+            self.watcher.selected = choice;
+            self.watcher.logs.clear();
+            self.watcher.logs_last = None;
+        }
+        if let Some((what, service)) = action {
+            self.watcher.confirm_remove = None;
+            if what == "remove" && self.watcher.selected.as_deref() == Some(service.as_str()) {
+                self.watcher.selected = None;
+            }
+            self.runner_action(what, service);
+        }
+        if go_setup {
+            self.tab = Tab::Setup;
+        }
+        self.log_card(ui, host);
+    }
+
+    /// O log da IA na tarefa atual do runner escolhido: o de quem corrige ou, na revisão, o do revisor.
+    fn log_card(&mut self, ui: &mut egui::Ui, host: Host) {
+        let Some(service) = self.watcher.selected.clone() else { return };
+        let runner: Option<RunnerStatus> = self.watcher.page.as_ref().and_then(|p| p.runners.iter().find(|r| r.service == service).cloned());
+        let Some(runner) = runner else { return };
+        card(ui, &format!("Log da IA · {}", runner.name), |ui| {
+            if runner.state != "working" {
+                ui.label(RichText::new("Sem tarefa agora. O log aparece aqui quando o runner pegar uma issue.").color(MUTED));
+                return;
+            }
+            ui.horizontal(|ui| {
+                if let Some(step) = runner.step_label() {
+                    ui.label(RichText::new(step).color(ACCENT));
+                }
+                if let Some(url) = runner.run_url()
+                    && ui.link("Abrir a execução no GitHub").clicked() {
+                        host.open_url(&url);
+                    }
+            });
+            if self.watcher.logs.trim().is_empty() {
+                ui.label(RichText::new("A IA ainda não escreveu nada nesta etapa.").color(MUTED));
+            }
+            egui::ScrollArea::vertical().max_height(360.0).stick_to_bottom(true).auto_shrink([false, true]).show(ui, |ui| {
+                ui.add(egui::Label::new(RichText::new(&self.watcher.logs).monospace().size(12.0).color(Color32::from_rgb(0xD5, 0xDA, 0xE3))).wrap());
+            });
+        });
+    }
+
     /// O teste dos runners, ao vivo: cada um gira enquanto testa e vira um check verde ao passar.
     fn tests_card(&mut self, ui: &mut egui::Ui, check: &Check) {
         let testing = self.busy == Some(Task::Test);
@@ -912,6 +1195,25 @@ fn card(ui: &mut egui::Ui, title: &str, body: impl FnOnce(&mut egui::Ui)) {
             body(ui);
         });
     ui.add_space(10.0);
+}
+
+fn state_color(runner: &RunnerStatus) -> Color32 {
+    match runner.state.as_str() {
+        "working" => ACCENT,
+        "idle" => Color32::from_rgb(0x8F, 0xD3, 0x9C),
+        "paused" => WARN,
+        _ => DANGER,
+    }
+}
+
+/// Trabalhando gira; os outros estados são uma bolinha da cor do estado.
+fn runner_state_icon(ui: &mut egui::Ui, runner: &RunnerStatus) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::hover());
+    if runner.state == "working" {
+        egui::Spinner::new().size(14.0).color(ACCENT).paint_at(ui, rect);
+    } else {
+        ui.painter().circle_filled(rect.center(), 5.0, state_color(runner));
+    }
 }
 
 /// Um círculo verde com um check (passou) ou vermelho com um X (falhou), desenhado: a fonte padrão

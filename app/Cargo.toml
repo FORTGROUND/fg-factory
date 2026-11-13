@@ -1,6 +1,6 @@
 [package]
 name = "fg-factory-setup"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 description = "Configura os runners do FG Factory numa máquina: macOS, Linux ou Windows com WSL."
 license = "MIT"

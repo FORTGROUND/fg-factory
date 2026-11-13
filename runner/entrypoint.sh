@@ -80,10 +80,11 @@ unset STORED_CLAUDE STORED_API_KEY STORED_TRACKER STORED_OPENAI
 
 if [ ! -f .runner ]; then
   : "${REGISTRATION_TOKEN:?primeira subida: defina FACTORY_REGISTRATION_TOKEN (README)}"
-  # --no-default-labels: só o rótulo factory. Com os padrões (self-hosted, Linux, X64...) este
+  # --no-default-labels: só o rótulo factory e um com o próprio nome (o teste do app escolhe o
+  # runner por ele). Com os padrões (self-hosted, Linux, X64...) este
   # runner poderia pegar jobs de outros workflows da organização, como o deploy de produção.
   as_factory ./config.sh --unattended --url "https://github.com/$ORG" --token "$REGISTRATION_TOKEN" \
-    --name "$NAME" --labels factory --no-default-labels --work _work --replace
+    --name "$NAME" --labels "factory,$NAME" --no-default-labels --work _work --replace
 fi
 unset REGISTRATION_TOKEN
 

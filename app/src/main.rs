@@ -15,7 +15,7 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread;
 
 const ICON_PNG: &[u8] = include_bytes!("../assets/icon-256.png");
-const TOKENS_URL: &str = "https://tracker.fortground.com.br/account/?tab=tokens";
+const TOKENS_URL: &str = "https://tracker.fortground.com.br/account/?tab=tokens&new=factory";
 const DEVICE_URL: &str = "https://github.com/login/device";
 const README_URL: &str = "https://github.com/FORTGROUND/fg-factory#runners-próprios";
 
@@ -59,6 +59,15 @@ enum Task {
     InstallTools,
     GhLogin,
     Apply,
+    Test,
+}
+
+/// O andamento de um runner no teste: rodando, passou ou falhou, com o texto do passo.
+#[derive(Clone, Debug, PartialEq)]
+enum RunnerState {
+    Running(String),
+    Passed(String),
+    Failed(String),
 }
 
 enum Msg {
@@ -123,6 +132,9 @@ struct App {
     show_log: bool,
     login: Option<Login>,
     claude_api_key: bool,
+    /// O teste dos runners, por serviço (runner1, runner2…), na ordem.
+    tests: std::collections::BTreeMap<String, RunnerState>,
+    tests_finished: Option<bool>,
 }
 
 impl App {
@@ -147,6 +159,8 @@ impl App {
             show_log: false,
             login: None,
             claude_api_key: false,
+            tests: Default::default(),
+            tests_finished: None,
         };
         app.run(Task::Bootstrap);
         app
@@ -169,6 +183,10 @@ impl App {
         let line = host::sender(&tx, Msg::Line, wake.clone());
         let setup = self.setup_sh();
         let input = (task == Task::Apply).then(|| self.answers.to_input());
+        if task == Task::Test {
+            self.tests.clear();
+            self.tests_finished = None;
+        }
         if task == Task::Apply {
             self.finished = None;
             self.show_log = true;
@@ -205,6 +223,7 @@ impl App {
                 Task::InstallTools => host.stream(&format!("{setup} --install-tools"), None, line),
                 Task::GhLogin => host.stream(&format!("{setup} --gh-login"), None, line),
                 Task::Apply => host.stream(&format!("{setup} --apply"), input, line),
+                Task::Test => host.stream(&format!("{setup} --test"), None, line),
             };
             let _ = tx.send(Msg::Finished(task, ok));
             wake();
@@ -301,6 +320,20 @@ impl App {
                     self.run(Task::Check);
                 }
                 Msg::Line(text) => {
+                    // `::runner::<serviço>::<step|ok|fail>::<texto>`: o andamento do teste de um runner.
+                    if let Some(rest) = text.trim().strip_prefix("::runner::") {
+                        let mut parts = rest.splitn(3, "::");
+                        if let (Some(service), Some(kind), Some(detail)) = (parts.next(), parts.next(), parts.next()) {
+                            let detail = detail.trim().to_owned();
+                            let state = match kind {
+                                "ok" => RunnerState::Passed(detail),
+                                "fail" => RunnerState::Failed(detail),
+                                _ => RunnerState::Running(detail),
+                            };
+                            self.tests.insert(service.to_owned(), state);
+                        }
+                        continue;
+                    }
                     if let Some(line) = LogLine::parse(&text) {
                         self.log.push(line);
                     }
@@ -324,6 +357,15 @@ impl App {
                         Task::Apply => {
                             self.finished = Some(ok);
                             self.answers.forget_secrets();
+                            // Configurou: testa cada runner na hora (o check da máquina vem depois).
+                            if ok {
+                                self.run(Task::Test);
+                            } else {
+                                self.run(Task::Check);
+                            }
+                        }
+                        Task::Test => {
+                            self.tests_finished = Some(ok);
                             self.run(Task::Check);
                         }
                         Task::Check => {}
@@ -400,6 +442,7 @@ impl App {
             self.credentials_card(ui, &check);
         });
         self.apply_bar(ui, &check);
+        self.tests_card(ui, &check);
         self.device_code(ui);
         self.log_view(ui);
     }
@@ -645,6 +688,62 @@ impl App {
         }
     }
 
+    /// O teste dos runners, ao vivo: cada um gira enquanto testa e vira um check verde ao passar.
+    fn tests_card(&mut self, ui: &mut egui::Ui, check: &Check) {
+        let testing = self.busy == Some(Task::Test);
+        if self.tests.is_empty() && !testing {
+            if check.current.runners_running > 0 && self.busy.is_none() && ui.button("Testar os runners desta máquina").clicked() {
+                self.run(Task::Test);
+            }
+            return;
+        }
+        let passed = self.tests.values().filter(|s| matches!(s, RunnerState::Passed(_))).count();
+        let title = if testing { format!("Testando os runners ({passed} de {} prontos)", self.tests.len()) } else { "Teste dos runners".to_owned() };
+        let mut again = false;
+        card(ui, &title, |ui| {
+            if self.tests.is_empty() {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label("Começando…");
+                });
+            }
+            for (service, state) in &self.tests {
+                ui.horizontal(|ui| {
+                    let (rect, _) = ui.allocate_exact_size(egui::vec2(22.0, 22.0), egui::Sense::hover());
+                    match state {
+                        RunnerState::Running(_) => {
+                            egui::Spinner::new().size(18.0).color(ACCENT).paint_at(ui, rect.shrink(2.0));
+                        }
+                        RunnerState::Passed(_) => check_icon(ui, rect, true),
+                        RunnerState::Failed(_) => check_icon(ui, rect, false),
+                    }
+                    let (text, color) = match state {
+                        RunnerState::Running(t) => (t.as_str(), MUTED),
+                        RunnerState::Passed(t) => (t.as_str(), ACCENT),
+                        RunnerState::Failed(t) => (t.as_str(), DANGER),
+                    };
+                    ui.label(RichText::new(service).monospace().strong().color(Color32::WHITE));
+                    ui.label(RichText::new(text).color(color));
+                });
+            }
+            match self.tests_finished {
+                Some(true) => {
+                    ui.add_space(4.0);
+                    ui.label(RichText::new("Todos os runners passaram. A máquina está pronta para corrigir issues de todos os repositórios com o workflow.").color(ACCENT));
+                }
+                Some(false) => {
+                    ui.add_space(4.0);
+                    ui.label(RichText::new("Algum runner não passou. Corrija o que aparece em vermelho e teste de novo.").color(DANGER));
+                    again = self.busy.is_none() && ui.button("Testar de novo").clicked();
+                }
+                None => {}
+            }
+        });
+        if again {
+            self.run(Task::Test);
+        }
+    }
+
     /// O código do login do GitHub ou do Codex, grande, com o botão para abrir a página.
     fn device_code(&mut self, ui: &mut egui::Ui) {
         let Some(code) = self.log.iter().rev().find(|l| l.kind == LineKind::Code).map(|l| l.text.clone()) else { return };
@@ -813,6 +912,24 @@ fn card(ui: &mut egui::Ui, title: &str, body: impl FnOnce(&mut egui::Ui)) {
             body(ui);
         });
     ui.add_space(10.0);
+}
+
+/// Um círculo verde com um check (passou) ou vermelho com um X (falhou), desenhado: a fonte padrão
+/// não tem esses símbolos.
+fn check_icon(ui: &egui::Ui, rect: egui::Rect, ok: bool) {
+    let painter = ui.painter();
+    let c = rect.center();
+    let r = rect.width().min(rect.height()) / 2.0 - 1.0;
+    painter.circle_filled(c, r, if ok { ACCENT } else { DANGER });
+    let stroke = egui::Stroke::new(2.2, BG);
+    if ok {
+        painter.line_segment([c + egui::vec2(-r * 0.45, 0.0), c + egui::vec2(-r * 0.1, r * 0.38)], stroke);
+        painter.line_segment([c + egui::vec2(-r * 0.1, r * 0.38), c + egui::vec2(r * 0.5, -r * 0.35)], stroke);
+    } else {
+        let d = r * 0.38;
+        painter.line_segment([c + egui::vec2(-d, -d), c + egui::vec2(d, d)], stroke);
+        painter.line_segment([c + egui::vec2(-d, d), c + egui::vec2(d, -d)], stroke);
+    }
 }
 
 /// Uma linha de situação: bolinha verde (ok) ou vermelha (falta algo) e o texto.

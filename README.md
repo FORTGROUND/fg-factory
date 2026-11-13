@@ -225,12 +225,20 @@ Settings → Resources: o app sugere quantos runners cabem pelo que o Docker tem
      grande; digite-o na página e pronto. Um login serve a todos os runners da máquina. Ou
      escolha a chave da API da OpenAI e cole a chave. Na conta do ChatGPT, o login por código
      precisa estar permitido (Configurações → Segurança);
-   - **FG Tracker:** o botão **Criar o token no FG Tracker** abre o painel em Conta → Tokens de
-     acesso. Crie pelo modelo **FG Factory**, restrito à organização, copie e cole no app;
+   - **FG Tracker:** o botão **Criar o token no FG Tracker** abre o painel com o novo token já
+     preenchido: modelo **FG Factory**, restrito à organização em que você está, com o nome dela
+     em destaque. Se você não estiver logado, o painel pede o login e volta para o mesmo lugar;
+     sem nenhuma organização, abre a criação de uma antes. Crie, copie e cole no app;
 6. em "Configurar esta máquina": grava as credenciais no `.env` dos runners (só o seu usuário
    lê), registra os runners na organização pelo `gh`, monta a imagem, sobe os runners e confere
    que ficaram online. Se você deixar marcado, apaga segredos antigos dos repositórios que
-   passariam por cima destas credenciais.
+   passariam por cima destas credenciais;
+7. **testa cada runner**, todos ao mesmo tempo, com o andamento na tela (um check verde por
+   runner que passa): online no GitHub, credenciais guardadas, o agente escolhido respondendo
+   (uma pergunta mínima, só no primeiro runner), o Docker próprio, o sinal aceito pelo painel do
+   FG Tracker e um job curto disparado no GitHub só para aquele runner. O job é o
+   `runner-check.yml` do repositório `<organização>/factory` (ou o de `FACTORY_CHECK_REPO`); sem
+   ele, o teste para antes do job. Cada runner ganha um rótulo com o próprio nome para isso.
 
 Para mudar algo depois (mais runners, outro agente, um token novo), abra o app de novo: o que
 fica em branco mantém o que já está gravado.

@@ -13,6 +13,7 @@
 #   bash setup.sh --gh-login      entra no GitHub pelo navegador, com código
 #   bash setup.sh --login-claude  conecta a conta do Claude (claude setup-token, no contêiner)
 #   bash setup.sh --login-codex   conecta a conta do ChatGPT ao Codex (no contêiner, vale para todos)
+#   bash setup.sh --test          testa cada runner rodando nesta máquina, em paralelo
 #
 # Rodar de novo é seguro: o que fica em branco mantém o valor gravado.
 #
@@ -197,6 +198,118 @@ login_codex() {
   in_runner timeout 900 codex login --device-auth || true
   in_runner codex login status >/dev/null 2>&1 || fail "a conta do ChatGPT não foi conectada (o código vale 15 minutos). Clique em Conectar de novo."
   say "::ok::Codex conectado; vale para todos os runners desta máquina."
+}
+
+# ---- --test: cada runner, em paralelo ---------------------------------------------------------
+# Para cada runner que roda nesta máquina:
+#   1. aparece online no GitHub;
+#   2. tem as credenciais, o agente escolhido está logado e o Docker próprio responde. No primeiro
+#      runner, uma pergunta mínima de verdade a cada agente em uso: prova que a credencial vale;
+#   3. o painel do FG Tracker aceitou o sinal dele (o token do FG Tracker vale);
+#   4. um job curto, disparado no GitHub só para ele (pelo rótulo com o nome), termina verde.
+# Cada linha `::runner::<serviço>::<step|ok|fail>::<texto>` é o andamento de um runner; o app as mostra.
+CHECK_REPO_DEFAULT=factory
+check_runner() {  # check_runner <serviço> <org> <máquina> <repositório do runner check>
+  local service="$1" org="$2" machine="$3" check_repo="$4" name id result url run status conclusion
+  name="factory-$machine-${service#runner}"
+  emit() { printf '::runner::%s::%s::%s\n' "$service" "$1" "$2"; }
+  emit step "Esperando aparecer online no GitHub"
+  id=""
+  for _ in $(seq 1 40); do
+    id="$(gh api "orgs/$org/actions/runners" --paginate --jq ".runners[] | select(.name == \"$name\" and .status == \"online\") | .id" 2>/dev/null | head -1 || true)"
+    [ -n "$id" ] && break
+    sleep 3
+  done
+  [ -n "$id" ] || { emit fail "$name não apareceu online no GitHub. Veja: docker compose logs $service"; return 1; }
+
+  emit step "Conferindo credenciais, agente e Docker"
+  local probe=false; [ "$service" = runner1 ] && probe=true
+  if ! result="$(docker compose exec -T -u factory -e HOME=/home/factory -e PROBE="$probe" "$service" bash -s 2>&1 <<'CHECK'
+set -u
+f="$HOME/.fg-factory/credentials"
+value() { sed -n "s/^$1=//p" "$f" 2>/dev/null | head -1; }
+[ -s "$f" ] || { echo "sem as credenciais guardadas"; exit 1; }
+for agent in $(printf '%s\n' "${FACTORY_AGENT:-claude}" "${FACTORY_REVIEW_AGENT:-${FACTORY_AGENT:-claude}}" | sort -u); do
+  if [ "$agent" = claude ]; then
+    token="$(value CLAUDE_CODE_OAUTH_TOKEN)"; key="$(value ANTHROPIC_API_KEY)"
+    [ -n "$token$key" ] || { echo "sem a credencial do Claude Code"; exit 1; }
+    if [ "$PROBE" = true ]; then
+      answer="$(CLAUDE_CODE_OAUTH_TOKEN="$token" ANTHROPIC_API_KEY="$key" timeout 120 claude -p "Responda apenas: ok" --model haiku --max-turns 1 --output-format text < /dev/null 2>&1 || true)"
+      grep -qi "ok" <<< "$answer" || { echo "o Claude Code não aceitou a credencial: $(head -c 160 <<< "$answer")"; exit 1; }
+    fi
+  else
+    if [ -z "$(value OPENAI_API_KEY)" ] && ! codex login status >/dev/null 2>&1; then echo "o Codex não está conectado"; exit 1; fi
+    if [ "$PROBE" = true ]; then
+      answer="$(CODEX_API_KEY="$(value OPENAI_API_KEY)" timeout 180 codex exec --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox -c 'model_reasoning_effort="low"' -c 'web_search="disabled"' --color never -o /tmp/codex-probe.txt - <<< "Responda apenas: ok" >/dev/null 2>&1; cat /tmp/codex-probe.txt 2>/dev/null; rm -f /tmp/codex-probe.txt)"
+      grep -qi "ok" <<< "$answer" || { echo "o Codex não respondeu com a credencial guardada"; exit 1; }
+    fi
+  fi
+done
+if [ "${FACTORY_DOCKER:-}" = true ] && ! docker info >/dev/null 2>&1; then echo "o Docker próprio do runner não responde"; exit 1; fi
+echo ok
+CHECK
+  )"; then
+    emit fail "$(tail -1 <<< "$result")"; return 1
+  fi
+
+  emit step "Conferindo o sinal ao painel do FG Tracker"
+  local beat=""
+  for _ in $(seq 1 25); do
+    beat="$(docker compose logs --no-log-prefix "$service" 2>/dev/null | grep '^heartbeat:' | tail -1 || true)"
+    [ -n "$beat" ] && break
+    sleep 3
+  done
+  case "$beat" in
+    *recebendo*) ;;
+    '') emit fail "o runner não mandou sinal ao painel do FG Tracker (falta o token do FG Tracker?)"; return 1 ;;
+    *) emit fail "o FG Tracker recusou o token: ${beat#heartbeat: }"; return 1 ;;
+  esac
+
+  # Um job de verdade, só para este runner: o rótulo com o nome dele o escolhe.
+  if ! gh workflow view runner-check.yml --repo "$check_repo" >/dev/null 2>&1; then
+    emit ok "Pronto (sem o job de teste: $check_repo não tem o workflow runner-check.yml)"; return 0
+  fi
+  gh api "orgs/$org/actions/runners/$id/labels" --jq '.labels[].name' 2>/dev/null | grep -qx "$name" \
+    || gh api -X POST "orgs/$org/actions/runners/$id/labels" -f "labels[]=$name" >/dev/null 2>&1 || true
+  emit step "Rodando um job de teste pelo GitHub"
+  url="$(gh workflow run runner-check.yml --repo "$check_repo" -f runner="$name" 2>&1 | grep -o 'https://[^ ]*/runs/[0-9]*' | tail -1 || true)"
+  run="${url##*/}"
+  [ -n "$run" ] || { emit fail "não consegui disparar o job de teste em $check_repo"; return 1; }
+  for _ in $(seq 1 100); do
+    read -r status conclusion <<< "$(gh run view "$run" --repo "$check_repo" --json status,conclusion --jq '.status + " " + (.conclusion // "")' 2>/dev/null || echo "? ")"
+    [ "$status" = completed ] && break
+    sleep 3
+  done
+  case "$status/$conclusion" in
+    completed/success) emit ok "Pronto: online, credenciais, agente, painel e um job de teste" ;;
+    completed/*) emit fail "o job de teste terminou como $conclusion: $url"; return 1 ;;
+    *) emit fail "o job de teste não terminou em 5 minutos: $url"; return 1 ;;
+  esac
+}
+
+test_runners() {
+  if [ -n "$DRY" ]; then  # modo de teste: dois runners que terminam em tempos diferentes
+    for s in runner1 runner2; do printf '::runner::%s::step::Esperando aparecer online no GitHub\n' "$s"; done
+    sleep 2; printf '::runner::runner2::step::Rodando um job de teste pelo GitHub\n'; sleep 2
+    printf '::runner::runner2::ok::Pronto: online, credenciais, agente, painel e um job de teste\n'; sleep 2
+    printf '::runner::runner1::ok::Pronto: online, credenciais, agente, painel e um job de teste\n'
+    say "::ok::Todos os runners passaram no teste."; return 0
+  fi
+  command -v gh >/dev/null && gh auth status >/dev/null 2>&1 || fail "o gh não está logado."
+  local org machine services check_repo failed=0
+  org="$(default_org)"; machine="$(clean_machine "$(env_get FACTORY_MACHINE)")"
+  check_repo="${FACTORY_CHECK_REPO:-$org/$CHECK_REPO_DEFAULT}"
+  services="$(docker compose ps --services --status running 2>/dev/null | grep '^runner[0-9]' | sort || true)"
+  [ -n "$services" ] || fail "nenhum runner rodando nesta máquina."
+  say "::step::Testando $(wc -w <<< "$services" | tr -d ' ') runner(s)"
+  local pids=()
+  for service in $services; do
+    printf '::runner::%s::step::Na fila\n' "$service"
+    check_runner "$service" "$org" "$machine" "$check_repo" & pids+=("$!")
+  done
+  for pid in "${pids[@]}"; do wait "$pid" || failed=$((failed + 1)); done
+  [ "$failed" -eq 0 ] || fail "$failed runner(s) não passaram no teste."
+  say "::ok::Todos os runners passaram no teste."
 }
 
 # ---- perguntas do modo interativo -------------------------------------------------------------
@@ -454,6 +567,7 @@ case "${1:-}" in
   --gh-login) gh_login ;;
   --login-claude) ensure_env; login_claude ;;
   --login-codex) ensure_env; login_codex ;;
+  --test) ensure_env; test_runners ;;
   --apply) ensure_env; from_stdin; apply ;;
   '') ensure_env; interactive; apply ;;
   *) fail "opção desconhecida: $1 (veja o começo do setup.sh)" ;;

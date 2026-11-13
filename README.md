@@ -248,7 +248,10 @@ fica em branco mantém o que já está gravado.
 **Acompanhar os runners.** Com runners na máquina, o app abre na aba **Runners**, que se
 atualiza a cada 3 segundos:
 
-- o estado de cada runner: livre, trabalhando, pausado ou sem sinal do GitHub;
+- o estado de cada runner: livre, trabalhando, pausado, sem sinal do GitHub ou **precisa de
+  configuração**, com o motivo (sem as credenciais, sem a credencial do agente escolhido, sem o
+  token do FG Tracker ou token recusado pelo painel). Isso é conferido o tempo todo, sem gastar
+  sessão, e aparece também na aba Configurar;
 - quando trabalha: a etapa (preparando, corrigindo, validando, revisando, publicando, com o
   agente de cada uma), o repositório, a issue e o título dela, e o link da execução no GitHub;
 - **Ver log**: o que a IA está fazendo na etapa atual (o que escreveu e cada ferramenta que
@@ -271,9 +274,12 @@ bash setup.sh
 Ele pergunta no terminal e pede os segredos numa janela do sistema (ou no terminal, sem
 mostrar o que é digitado). `bash setup.sh --check` mostra, em JSON, o que a máquina tem.
 
-**4. Ligue o automático em cada repositório** quando quiser: a variável `FACTORY_AUTO=true`
-(passo 5 do [Passo a passo](#5-teste-em-uma-issue-e-ligue-o-automático)). Até lá, só roda o que
-você disparar à mão e as respostas a issues que esperam uma pessoa.
+**4. Ligue o automático em cada repositório** quando quiser, no cartão **Repositórios** da aba
+Configurar: ele lista os repositórios da organização com o workflow (os que ainda esperam o merge
+do PR aparecem marcados) e cada chave grava a variável `FACTORY_AUTO` do repositório na hora. Essa
+variável é do repositório, não do runner. Desligado, só roda o que você disparar à mão e as
+respostas a issues que esperam uma pessoa. No terminal: `bash setup.sh --repos` e
+`bash setup.sh --auto <repositório> on|off`.
 
 A imagem traz git, gh, jq, Node, pnpm, bun, Rust, ffmpeg, o Claude Code e o Codex. Se o seu `validate` precisa de
 outra coisa (Python, Go, Java), acrescente ao `runner/Dockerfile` e reconstrua.

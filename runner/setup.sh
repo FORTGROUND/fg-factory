@@ -11,6 +11,8 @@
 #   bash setup.sh --apply         configura com as respostas lidas da entrada (usado pelo app)
 #   bash setup.sh --install-tools instala o GitHub CLI (gh) e o jq em ~/.local/bin, sem sudo
 #   bash setup.sh --gh-login      entra no GitHub pelo navegador, com código
+#   bash setup.sh --login-claude  conecta a conta do Claude (claude setup-token, no contêiner)
+#   bash setup.sh --login-codex   conecta a conta do ChatGPT ao Codex (no contêiner, vale para todos)
 #
 # Rodar de novo é seguro: o que fica em branco mantém o valor gravado.
 #
@@ -161,6 +163,40 @@ gh_login() {
     | sed -u 's/^! First copy your one-time code: /::code::/'
   gh auth status >/dev/null 2>&1 || fail "o login no GitHub não terminou."
   say "::ok::Logado no GitHub como $(gh api user --jq .login)."
+}
+
+# ---- logins pelo navegador, dentro da imagem dos runners --------------------------------------
+# Os CLIs já estão na imagem: a pessoa não precisa instalar nada nem abrir um terminal. O comando
+# roda como o usuário dos jobs, com o volume do login do Codex (o mesmo de todos os runners).
+in_runner() {
+  [ -z "$DRY" ] || { say "[teste] $*"; return 0; }
+  command -v docker >/dev/null && docker info >/dev/null 2>&1 || fail "o Docker não está rodando."
+  # A configuração do compose pede a organização e a máquina; numa máquina nova o .env ainda não as tem.
+  export FACTORY_ORG FACTORY_MACHINE
+  FACTORY_ORG="$(default_org)"; FACTORY_MACHINE="$(default_machine)"
+  if ! docker image inspect fg-factory-runner >/dev/null 2>&1; then
+    say "::step::Preparando a imagem dos runners (alguns minutos, só na primeira vez)"
+    docker compose build -q runner1 2>&1 | tail -5
+  fi
+  if docker compose ps --services --status running 2>/dev/null | grep -qx runner1; then
+    docker compose exec -T -u factory -e HOME=/home/factory -e BROWSER=true runner1 "$@"
+  else
+    docker compose run --rm --no-deps -T -u factory -e HOME=/home/factory -e BROWSER=true --entrypoint "" runner1 "$@"
+  fi
+}
+# O `claude setup-token` precisa de um terminal: o `script` dá um, largo o bastante para o endereço
+# e o token saírem numa linha só. A saída (com o token) vai só para quem chamou, o app.
+login_claude() {
+  say "::step::Conectando a conta do Claude"
+  in_runner pkill -f "claude setup-token" >/dev/null 2>&1 || true   # uma tentativa anterior, esquecida aberta
+  in_runner timeout 900 script -q -c "stty cols 4000 rows 50; claude setup-token" /dev/null
+}
+login_codex() {
+  say "::step::Conectando a conta do ChatGPT ao Codex"
+  in_runner pkill -f "codex login" >/dev/null 2>&1 || true
+  in_runner timeout 900 codex login --device-auth || true
+  in_runner codex login status >/dev/null 2>&1 || fail "a conta do ChatGPT não foi conectada (o código vale 15 minutos). Clique em Conectar de novo."
+  say "::ok::Codex conectado; vale para todos os runners desta máquina."
 }
 
 # ---- perguntas do modo interativo -------------------------------------------------------------
@@ -416,6 +452,8 @@ case "${1:-}" in
   --check) ensure_env; check ;;
   --install-tools) install_tools ;;
   --gh-login) gh_login ;;
+  --login-claude) ensure_env; login_claude ;;
+  --login-codex) ensure_env; login_codex ;;
   --apply) ensure_env; from_stdin; apply ;;
   '') ensure_env; interactive; apply ;;
   *) fail "opção desconhecida: $1 (veja o começo do setup.sh)" ;;

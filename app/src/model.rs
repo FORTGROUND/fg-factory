@@ -165,10 +165,14 @@ impl Answers {
             out.push("Dê um nome a esta máquina.".into());
         }
         if self.uses(Agent::Claude) && !check.saved.claude && self.claude.trim().is_empty() {
-            out.push("Falta o token do Claude Code.".into());
+            out.push("Conecte a conta do Claude.".into());
         }
-        if self.uses(Agent::Codex) && self.codex_login == CodexLogin::Api && !check.saved.openai && self.openai.trim().is_empty() {
-            out.push("Falta a chave da API da OpenAI.".into());
+        if self.uses(Agent::Codex) {
+            match self.codex_login {
+                CodexLogin::Api if !check.saved.openai && self.openai.trim().is_empty() => out.push("Falta a chave da API da OpenAI.".into()),
+                CodexLogin::ChatGpt if !check.saved.codex_login => out.push("Conecte a conta do ChatGPT.".into()),
+                _ => {}
+            }
         }
         if !check.saved.tracker && self.tracker.trim().is_empty() {
             out.push("Falta o token do FG Tracker.".into());
@@ -267,6 +271,28 @@ pub fn find_code(text: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
+const TOKEN_CHARS: fn(char) -> bool = |c| c.is_ascii_alphanumeric() || c == '-' || c == '_';
+const URL_END: fn(char) -> bool = |c| c.is_whitespace() || "\"'<>)".contains(c);
+
+/// O que o `claude setup-token` já mostrou: o endereço de login e, no fim, o token. Só vale o que
+/// chegou inteiro (com algo depois, ou com o processo encerrado), para não pegar meio token.
+pub fn claude_login(text: &str, ended: bool) -> (Option<String>, Option<String>) {
+    let complete = |rest: &str, len: usize| ended || rest[len..].chars().next().is_some();
+    let url = text.find("https://").and_then(|start| {
+        text[start..].match_indices("https://").map(|(i, _)| start + i).find_map(|at| {
+            let rest = &text[at..];
+            let len = rest.find(URL_END).unwrap_or(rest.len());
+            (rest[..len].contains("/oauth/authorize") && complete(rest, len)).then(|| rest[..len].to_owned())
+        })
+    });
+    let token = text.find("sk-ant-").and_then(|start| {
+        let rest = &text[start..];
+        let len = rest.find(|c| !TOKEN_CHARS(c)).unwrap_or(rest.len());
+        (len > 40 && complete(rest, len)).then(|| rest[..len].to_owned())
+    });
+    (url, token)
+}
+
 /// O primeiro endereço https de uma linha.
 pub fn find_url(text: &str) -> Option<String> {
     let start = text.find("https://")?;
@@ -308,10 +334,10 @@ mod tests {
     fn each_agent_asks_only_for_its_own_credential() {
         let check = parse_check(CHECK).unwrap();
         let mut a = Answers::from_check(&check);
-        // Codex corrige pela assinatura e Claude revisa: falta só o token do Claude.
-        assert_eq!(a.problems(&check), ["Falta o token do Claude Code."]);
+        // Codex corrige pela assinatura e Claude revisa: faltam as duas contas.
+        assert_eq!(a.problems(&check), ["Conecte a conta do Claude.", "Conecte a conta do ChatGPT."]);
         a.claude = " sk-ant-oat-1 \n".into();
-        assert!(a.problems(&check).is_empty());
+        assert_eq!(a.problems(&check), ["Conecte a conta do ChatGPT."]);
         a.codex_login = CodexLogin::Api;
         assert_eq!(a.problems(&check), ["Falta a chave da API da OpenAI."]);
         a.review_agent = Agent::Codex;
@@ -350,5 +376,30 @@ mod tests {
         assert!(LogLine::parse("   ").is_none());
         assert_eq!(find_url("Abra https://auth.openai.com/codex/device.").as_deref(), Some("https://auth.openai.com/codex/device"));
         assert_eq!(find_code("2026-11-12"), None);
+    }
+
+    #[test]
+    fn the_claude_login_gives_the_address_then_the_token_only_when_complete() {
+        let url = "https://claude.com/cai/oauth/authorize?code=true&client_id=x&scope=user%3Ainference&state=abc";
+        let screen = format!("Welcome·Openingbrowser…Browser didn't open?Use the url below{url}\r\nPastecodehereifprompted>");
+        assert_eq!(claude_login(&screen, false), (Some(url.to_owned()), None));
+        // Endereço cortado no fim do pedaço: espera o resto.
+        assert_eq!(claude_login(&url[..40], false).0, None);
+        let token = format!("sk-ant-oat01-{}", "A1b_2-".repeat(12));
+        assert_eq!(claude_login(&format!("{screen}\r\nYour token: {token}\r\n"), false).1, Some(token.clone()));
+        assert_eq!(claude_login(&format!("Your token: {}", &token[..30]), false).1, None);
+        assert_eq!(claude_login(&format!("Your token: {token}"), true).1, Some(token));
+    }
+
+    #[test]
+    fn each_login_is_required_only_for_the_agent_that_uses_it() {
+        let check = parse_check(CHECK).unwrap();
+        let mut a = Answers::from_check(&check);
+        a.claude = "sk-ant-oat01-x".into();
+        // Codex pela assinatura sem login: falta conectar.
+        assert_eq!(a.problems(&check), ["Conecte a conta do ChatGPT."]);
+        let mut logged = check.clone();
+        logged.saved.codex_login = true;
+        assert!(a.problems(&logged).is_empty());
     }
 }

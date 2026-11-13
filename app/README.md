@@ -7,6 +7,9 @@ a passo para quem vai usar está no [README do repositório](../README.md#config
   chama `setup.sh --check` para saber o que a máquina tem e `setup.sh --apply` para configurar.
   As respostas, inclusive os tokens, vão pela entrada padrão do script, nunca por argumento,
   arquivo temporário ou log.
+- Os logins do Claude Code e do Codex rodam os CLIs oficiais dentro da imagem dos runners
+  (`setup.sh --login-claude` e `--login-codex`): o app abre a página no navegador, mostra o código
+  (Codex) ou recebe o código colado (Claude) e lê o token da saída, que não vai para o log.
 - No Windows os comandos rodam dentro do WSL (`wsl.exe -e bash -lc`), onde estão o Docker, o `gh` e
   os runners.
 - Feito com [egui](https://github.com/emilk/egui); o executável tem uns 6 MB.

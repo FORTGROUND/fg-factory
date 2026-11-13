@@ -216,13 +216,17 @@ Settings → Resources: o app sugere quantos runners cabem pelo que o Docker tem
 3. pergunta a organização, o nome da máquina e **quantas tarefas ao mesmo tempo**, com uma
    sugestão pelo que o Docker tem (cada runner chega a uns 3 núcleos e 6 GB num build pesado);
 4. pergunta **quem corrige** e **quem revisa**: Claude Code ou Codex, cada etapa com o seu;
-5. pede só as credenciais que essas escolhas usam:
-   - **Claude Code:** o token de `claude setup-token` (rode no terminal; abre o navegador) ou
-     uma chave da API da Anthropic;
-   - **Codex:** o login da assinatura do ChatGPT (o app mostra um código para digitar no
-     navegador) ou uma chave da API da OpenAI;
-   - **FG Tracker:** um token criado no painel em Conta → Tokens de acesso, modelo **FG
-     Factory**, restrito à organização. O botão "Abrir" leva à página;
+5. pede só as credenciais que essas escolhas usam, sem terminal:
+   - **Claude Code:** o botão **Conectar com a conta do Claude** abre a página de login no
+     navegador. Entre, clique em Autorizar, copie o código que a página mostra e cole no app.
+     O app pega o token sozinho (vale um ano). Quem prefere, marca "chave da API da Anthropic"
+     e cola a chave;
+   - **Codex:** o botão **Conectar com a conta do ChatGPT** abre a página e mostra um código
+     grande; digite-o na página e pronto. Um login serve a todos os runners da máquina. Ou
+     escolha a chave da API da OpenAI e cole a chave. Na conta do ChatGPT, o login por código
+     precisa estar permitido (Configurações → Segurança);
+   - **FG Tracker:** o botão **Criar o token no FG Tracker** abre o painel em Conta → Tokens de
+     acesso. Crie pelo modelo **FG Factory**, restrito à organização, copie e cole no app;
 6. em "Configurar esta máquina": grava as credenciais no `.env` dos runners (só o seu usuário
    lê), registra os runners na organização pelo `gh`, monta a imagem, sobe os runners e confere
    que ficaram online. Se você deixar marcado, apaga segredos antigos dos repositórios que

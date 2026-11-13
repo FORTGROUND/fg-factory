@@ -66,6 +66,44 @@ enum Msg {
     Dir(String),
     Checked(Result<Box<Check>, String>),
     Finished(Task, bool),
+    LoginOutput(String),
+    LoginEnded(bool),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LoginKind {
+    Claude,
+    Codex,
+}
+
+/// Um login pelo navegador em andamento: o CLI roda no contêiner, o app abre a página, mostra o
+/// código e (no Claude) manda o código que a pessoa colou. A saída não vai para o log: ela traz o token.
+struct Login {
+    kind: LoginKind,
+    output: String,
+    url: Option<String>,
+    opened: bool,
+    code_tx: Option<Sender<String>>,
+    pasted: String,
+    sent: bool,
+    connected: bool,
+    ended: Option<bool>,
+}
+
+impl Login {
+    fn clean(&self) -> String {
+        host::strip_ansi(&self.output)
+    }
+    fn running(&self) -> bool {
+        self.ended.is_none() && !self.connected
+    }
+}
+
+/// O que um botão do formulário pediu; feito depois de desenhar, fora dos empréstimos da tela.
+enum Action {
+    Login(LoginKind),
+    SendCode,
+    Open(String),
 }
 
 struct App {
@@ -83,6 +121,8 @@ struct App {
     form_ready: bool,
     finished: Option<bool>,
     show_log: bool,
+    login: Option<Login>,
+    claude_api_key: bool,
 }
 
 impl App {
@@ -105,6 +145,8 @@ impl App {
             form_ready: false,
             finished: None,
             show_log: false,
+            login: None,
+            claude_api_key: false,
         };
         app.run(Task::Bootstrap);
         app
@@ -169,9 +211,95 @@ impl App {
         });
     }
 
+    /// Começa o login do Claude ou do Codex dentro do contêiner do runner.
+    fn start_login(&mut self, kind: LoginKind) {
+        if self.login.as_ref().is_some_and(Login::running) || self.busy == Some(Task::Apply) {
+            return;
+        }
+        let (code_tx, code_rx) = channel();
+        self.login = Some(Login { kind, output: String::new(), url: None, opened: false, code_tx: Some(code_tx), pasted: String::new(), sent: false, connected: false, ended: None });
+        let host = self.host;
+        let tx = self.tx.clone();
+        let ctx = self.ctx.clone();
+        let wake = move || ctx.request_repaint();
+        let chunk = host::sender(&tx, Msg::LoginOutput, wake.clone());
+        let script = format!("{} --login-{}", self.setup_sh(), if kind == LoginKind::Claude { "claude" } else { "codex" });
+        thread::spawn(move || {
+            let ok = host.stream_raw(&script, code_rx, chunk);
+            let _ = tx.send(Msg::LoginEnded(ok));
+            wake();
+        });
+    }
+
+    /// Lê o que o login já mostrou: abre a página uma vez e, no Claude, pega o token.
+    fn follow_login(&mut self) {
+        let host = self.host;
+        let Some(login) = self.login.as_mut() else { return };
+        let clean = login.clean();
+        let ended = login.ended.is_some();
+        match login.kind {
+            LoginKind::Claude => {
+                let (url, token) = model::claude_login(&clean, ended);
+                if login.url.is_none() {
+                    login.url = url;
+                }
+                // Código recusado: a tentativa acaba aqui, com uma mensagem clara.
+                if login.sent && !login.connected && clean.contains("OAuth error") {
+                    login.ended = Some(false);
+                    login.code_tx = None;
+                    login.output = "::fail::o código não foi aceito (incompleto, expirado ou de uma tentativa anterior). Clique em Conectar de novo e copie o código inteiro da página.".into();
+                    return;
+                }
+                if let Some(token) = token.filter(|_| !login.connected) {
+                    self.answers.claude = token;
+                    login.connected = true;
+                    // Pronto: fecha a entrada; o processo termina sozinho.
+                    login.code_tx = None;
+                    login.output.clear();
+                }
+            }
+            LoginKind::Codex => {
+                if login.url.is_none() {
+                    login.url = clean.lines().find_map(model::find_url);
+                }
+            }
+        }
+        if let (Some(url), false) = (login.url.clone(), login.opened) {
+            login.opened = true;
+            host.open_url(&url);
+        }
+    }
+
     fn drain(&mut self) {
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
+                Msg::LoginOutput(text) => {
+                    if let Some(login) = self.login.as_mut().filter(|l| l.running()) {
+                        login.output.push_str(&text);
+                        if login.output.len() > 256 * 1024 {
+                            let cut = login.output.len() - 128 * 1024;
+                            let cut = (cut..login.output.len()).find(|&i| login.output.is_char_boundary(i)).unwrap_or(0);
+                            login.output.drain(..cut);
+                        }
+                    }
+                    self.follow_login();
+                }
+                Msg::LoginEnded(ok) => {
+                    if let Some(login) = self.login.as_mut() {
+                        login.ended = Some(ok);
+                        login.code_tx = None;
+                    }
+                    self.follow_login();
+                    if let Some(login) = self.login.as_mut() {
+                        if login.kind == LoginKind::Codex && ok {
+                            login.connected = true;
+                        }
+                        if !login.connected {
+                            login.output = login.clean();
+                        }
+                    }
+                    self.run(Task::Check);
+                }
                 Msg::Line(text) => {
                     if let Some(line) = LogLine::parse(&text) {
                         self.log.push(line);
@@ -390,43 +518,96 @@ impl App {
     }
 
     fn credentials_card(&mut self, ui: &mut egui::Ui, check: &Check) {
-        let host = self.host;
+        let mut actions = Vec::new();
+        let applying = self.busy == Some(Task::Apply);
         card(ui, "Credenciais", |ui| {
-            ui.label(RichText::new("Digitadas uma vez, valem para todos os runners desta máquina. Ficam só no .env dos runners, que só o seu usuário lê.").color(MUTED));
-            ui.add_space(4.0);
-            let a = &mut self.answers;
-            if a.uses(Agent::Claude) {
+            ui.label(RichText::new("Valem para todos os runners desta máquina. Ficam só no .env dos runners, que só o seu usuário lê.").color(MUTED));
+            ui.add_space(6.0);
+            if self.answers.uses(Agent::Claude) {
                 ui.label(RichText::new("Claude Code").strong());
-                secret_field(ui, &mut a.claude, check.saved.claude, "Token de claude setup-token, ou chave da API da Anthropic");
-                ui.label(RichText::new("Gere no terminal com claude setup-token: ele abre o navegador e imprime um token sk-ant-oat…").color(MUTED));
-                ui.add_space(6.0);
+                let login = self.login.as_mut().filter(|l| l.kind == LoginKind::Claude);
+                let typed = !self.answers.claude.trim().is_empty();
+                if login.as_ref().is_some_and(|l| l.connected) || (typed && !self.claude_api_key) {
+                    status(ui, true, "Conta do Claude conectada. O token é gravado quando você configurar.");
+                } else if check.saved.claude {
+                    status(ui, true, "Conectado (já gravado nesta máquina)");
+                }
+                match login {
+                    Some(login) if login.running() => claude_login_steps(ui, login, &mut actions),
+                    login => {
+                        if let Some(error) = login.and_then(|l| l.ended.filter(|_| !l.connected).map(|_| login_error(&l.output))) {
+                            ui.label(RichText::new(error).color(DANGER));
+                        }
+                        let label = if check.saved.claude || typed { "Conectar de novo" } else { "Conectar com a conta do Claude" };
+                        if ui.add_enabled(!applying, egui::Button::new(RichText::new(label).strong())).clicked() {
+                            actions.push(Action::Login(LoginKind::Claude));
+                        }
+                    }
+                }
+                ui.checkbox(&mut self.claude_api_key, "Prefiro usar uma chave da API da Anthropic");
+                if self.claude_api_key {
+                    secret_field(ui, &mut self.answers.claude, check.saved.claude, "sk-ant-api…");
+                }
+                ui.add_space(10.0);
             }
-            if a.uses(Agent::Codex) {
+            if self.answers.uses(Agent::Codex) {
                 ui.label(RichText::new("Codex").strong());
                 ui.horizontal(|ui| {
-                    ui.radio_value(&mut a.codex_login, CodexLogin::ChatGpt, "Assinatura do ChatGPT");
-                    ui.radio_value(&mut a.codex_login, CodexLogin::Api, "Chave da API da OpenAI");
+                    ui.radio_value(&mut self.answers.codex_login, CodexLogin::ChatGpt, "Conta do ChatGPT");
+                    ui.radio_value(&mut self.answers.codex_login, CodexLogin::Api, "Chave da API da OpenAI");
                 });
-                if a.codex_login == CodexLogin::Api {
-                    secret_field(ui, &mut a.openai, check.saved.openai, "sk-…");
-                } else if check.saved.codex_login {
-                    status(ui, true, "Codex já logado nesta máquina");
+                if self.answers.codex_login == CodexLogin::Api {
+                    secret_field(ui, &mut self.answers.openai, check.saved.openai, "sk-…");
                 } else {
-                    ui.label(RichText::new("Ao configurar, aparece um código para você digitar no navegador. Um login serve a todos os runners.").color(MUTED));
+                    let login = self.login.as_ref().filter(|l| l.kind == LoginKind::Codex);
+                    if check.saved.codex_login {
+                        status(ui, true, "Conta do ChatGPT conectada. Vale para todos os runners desta máquina.");
+                    }
+                    match login {
+                        Some(login) if login.running() => codex_login_steps(ui, login, &mut actions),
+                        login => {
+                            if let Some(error) = login.and_then(|l| l.ended.filter(|_| !l.connected).map(|_| login_error(&l.output))) {
+                                ui.label(RichText::new(error).color(DANGER));
+                            }
+                            let label = if check.saved.codex_login { "Conectar de novo" } else { "Conectar com a conta do ChatGPT" };
+                            if ui.add_enabled(!applying, egui::Button::new(RichText::new(label).strong())).clicked() {
+                                actions.push(Action::Login(LoginKind::Codex));
+                            }
+                        }
+                    }
                 }
-                ui.add_space(6.0);
+                ui.add_space(10.0);
             }
             ui.label(RichText::new("FG Tracker").strong());
-            secret_field(ui, &mut a.tracker, check.saved.tracker, "Token do modelo FG Factory");
+            if check.saved.tracker {
+                status(ui, true, "Token gravado nesta máquina");
+            }
             ui.horizontal(|ui| {
-                ui.label(RichText::new("No painel: Conta, Tokens de acesso, modelo FG Factory, restrito à organização.").color(MUTED));
-                if ui.link("Abrir").clicked() {
-                    host.open_url(TOKENS_URL);
+                if ui.button(RichText::new("Criar o token no FG Tracker").strong()).clicked() {
+                    actions.push(Action::Open(TOKENS_URL.into()));
                 }
+                ui.label(RichText::new("Modelo FG Factory, restrito à organização. Copie o token e cole aqui:").color(MUTED));
             });
-            ui.add_space(6.0);
-            ui.checkbox(&mut a.delete_old_secrets, "Apagar segredos antigos dos repositórios, que passariam por cima destas credenciais");
+            secret_field(ui, &mut self.answers.tracker, check.saved.tracker, "Token do FG Tracker");
+            ui.add_space(8.0);
+            ui.checkbox(&mut self.answers.delete_old_secrets, "Apagar segredos antigos dos repositórios, que passariam por cima destas credenciais");
         });
+        for action in actions {
+            match action {
+                Action::Login(kind) => self.start_login(kind),
+                Action::Open(url) => self.host.open_url(&url),
+                Action::SendCode => {
+                    if let Some(login) = self.login.as_mut() {
+                        let code: String = login.pasted.chars().filter(|c| !c.is_whitespace()).collect();
+                        if let (Some(tx), false) = (&login.code_tx, code.is_empty()) {
+                            let _ = tx.send(format!("{code}\r"));
+                            login.sent = true;
+                            login.pasted.clear();
+                        }
+                    }
+                }
+            }
+        }
     }
 
     fn apply_bar(&mut self, ui: &mut egui::Ui, check: &Check) {
@@ -434,7 +615,8 @@ impl App {
         let problems = self.answers.problems(check);
         ui.horizontal(|ui| {
             let button = egui::Button::new(RichText::new("Configurar esta máquina").strong().color(BG)).fill(ACCENT).min_size(egui::vec2(220.0, 34.0));
-            let enabled = problems.is_empty() && self.busy.is_none();
+            let logging_in = self.login.as_ref().is_some_and(Login::running);
+            let enabled = problems.is_empty() && self.busy.is_none() && !logging_in;
             if ui.add_enabled(enabled, button).clicked() {
                 self.run(Task::Apply);
             }
@@ -523,6 +705,99 @@ impl App {
             host.open_url(README_URL);
         }
     }
+}
+
+/// Os passos do login do Claude: a página abre sozinha; a pessoa cola o código que ela mostra.
+fn claude_login_steps(ui: &mut egui::Ui, login: &mut Login, actions: &mut Vec<Action>) {
+    egui::Frame::new().fill(BG).corner_radius(8.0).inner_margin(egui::Margin::same(10)).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        match &login.url {
+            None => {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(progress_text(login));
+                });
+            }
+            Some(url) => {
+                ui.label("1. Entre na sua conta do Claude na página que abriu no navegador e clique em Autorizar.");
+                if ui.link("A página não abriu? Abrir de novo").clicked() {
+                    actions.push(Action::Open(url.clone()));
+                }
+                ui.add_space(4.0);
+                ui.label("2. A página mostra um código. Copie e cole aqui:");
+                ui.horizontal(|ui| {
+                    let field = ui.add(egui::TextEdit::singleline(&mut login.pasted).hint_text("Código da página do Claude").desired_width(ui.available_width() - 90.0));
+                    let enter = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    if ui.add_enabled(!login.pasted.trim().is_empty(), egui::Button::new("Enviar")).clicked() || enter {
+                        actions.push(Action::SendCode);
+                    }
+                });
+                if login.sent {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label("Conferindo o código…");
+                    });
+                }
+            }
+        }
+    });
+}
+
+/// Os passos do login do Codex: a página abre sozinha e o código fica grande para digitar lá.
+fn codex_login_steps(ui: &mut egui::Ui, login: &Login, actions: &mut Vec<Action>) {
+    egui::Frame::new().fill(BG).corner_radius(8.0).inner_margin(egui::Margin::same(10)).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        let clean = login.clean();
+        match (clean.lines().find_map(model::find_code), &login.url) {
+            (Some(code), Some(url)) => {
+                ui.label("Na página que abriu, entre na sua conta do ChatGPT e digite este código:");
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(&code).size(26.0).monospace().strong().color(ACCENT));
+                    if ui.button("Copiar").clicked() {
+                        ui.ctx().copy_text(code.clone());
+                    }
+                });
+                if ui.link("A página não abriu? Abrir de novo").clicked() {
+                    actions.push(Action::Open(url.clone()));
+                }
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(RichText::new("Esperando você confirmar no navegador…").color(MUTED));
+                });
+            }
+            _ => {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(progress_text(login));
+                });
+            }
+        }
+    });
+}
+
+/// Enquanto o login não mostrou a página: "preparando a imagem" na primeira vez, senão "abrindo".
+fn progress_text(login: &Login) -> String {
+    if login.clean().contains("Preparando a imagem") {
+        "Preparando a imagem dos runners (alguns minutos, só na primeira vez)…".into()
+    } else {
+        "Abrindo a página de login…".into()
+    }
+}
+
+/// O motivo de um login que não terminou: o que o setup.sh declarou, ou uma frase padrão. A saída
+/// dos CLIs não aparece: ela é em inglês, cheia de desenho de terminal e pode trazer o token.
+fn login_error(output: &str) -> String {
+    output
+        .lines()
+        .rev()
+        .find_map(|l| l.trim().strip_prefix("::fail::").map(|reason| {
+            let mut reason = reason.trim().to_owned();
+            if let Some(first) = reason.get(..1) {
+                reason.replace_range(..1, &first.to_uppercase());
+            }
+            reason
+        }))
+        .unwrap_or_else(|| "O login não terminou (a página expirou ou foi cancelada). Clique para tentar de novo.".into())
 }
 
 fn card(ui: &mut egui::Ui, title: &str, body: impl FnOnce(&mut egui::Ui)) {

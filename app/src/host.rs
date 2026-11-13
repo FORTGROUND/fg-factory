@@ -3,7 +3,8 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
-use std::sync::mpsc::Sender;
+use std::io::Read;
+use std::sync::mpsc::{Receiver, Sender};
 use std::thread;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -97,6 +98,45 @@ impl Host {
         child.wait().map(|status| status.success()).unwrap_or(false)
     }
 
+    /// Para os logins: entrega a saída em pedaços, como chega (a tela do Claude não termina as
+    /// linhas), e escreve na entrada o que vier por `input` (o código colado pela pessoa).
+    pub fn stream_raw(self, script: &str, input: Receiver<String>, chunk: impl Fn(String) + Send + Clone + 'static) -> bool {
+        let mut child = match self.command(script).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() {
+            Ok(child) => child,
+            Err(e) => {
+                chunk(format!("::fail::{}\n", self.spawn_error(e)));
+                return false;
+            }
+        };
+        if let Some(mut stdin) = child.stdin.take() {
+            thread::spawn(move || {
+                for text in input {
+                    if stdin.write_all(text.as_bytes()).and_then(|_| stdin.flush()).is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+        let mut readers = Vec::new();
+        for reader in [child.stdout.take().map(|r| Box::new(r) as Box<dyn Read + Send>), child.stderr.take().map(|r| Box::new(r) as Box<dyn Read + Send>)].into_iter().flatten() {
+            let chunk = chunk.clone();
+            readers.push(thread::spawn(move || {
+                let mut reader = reader;
+                let mut buf = [0u8; 8192];
+                while let Ok(n) = reader.read(&mut buf) {
+                    if n == 0 {
+                        break;
+                    }
+                    chunk(String::from_utf8_lossy(&buf[..n]).into_owned());
+                }
+            }));
+        }
+        for reader in readers {
+            let _ = reader.join();
+        }
+        child.wait().map(|status| status.success()).unwrap_or(false)
+    }
+
     fn spawn_error(self, e: std::io::Error) -> String {
         match self {
             Host::Wsl => format!("Não consegui abrir o WSL ({e}). Instale o WSL com o Ubuntu e o Docker Desktop com a integração do WSL ligada."),
@@ -106,9 +146,10 @@ impl Host {
 
     /// Abre um endereço no navegador da pessoa.
     pub fn open_url(self, url: &str) {
+        // No Windows, sem o `cmd`: ele quebraria o endereço no primeiro `&`.
         let mut command = if cfg!(windows) {
-            let mut c = Command::new("cmd");
-            c.args(["/C", "start", "", url]);
+            let mut c = Command::new("rundll32");
+            c.args(["url.dll,FileProtocolHandler", url]);
             c
         } else if cfg!(target_os = "macos") {
             let mut c = Command::new("open");
@@ -139,23 +180,36 @@ fn last_lines(text: &str, n: usize) -> String {
     lines[lines.len().saturating_sub(n)..].join("\n")
 }
 
-/// Tira as cores do terminal (o Codex e o Docker as usam).
+/// Tira os códigos de terminal: cores e movimentos de cursor (`ESC [ ... letra`), títulos
+/// (`ESC ] ... BEL`) e os de um caractere (`ESC 7`). O Codex, o Docker e o Claude os usam.
 pub fn strip_ansi(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {
-        if c == '\u{1b}' {
-            if chars.peek() == Some(&'[') {
-                chars.next();
+        if c != '\u{1b}' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('[') => {
                 for c in chars.by_ref() {
-                    if c.is_ascii_alphabetic() {
+                    if ('@'..='~').contains(&c) {
                         break;
                     }
                 }
             }
-            continue;
+            Some(']') => {
+                while let Some(c) = chars.next() {
+                    if c == '\u{7}' || (c == '\u{1b}' && chars.peek() == Some(&'\\')) {
+                        if c == '\u{1b}' {
+                            chars.next();
+                        }
+                        break;
+                    }
+                }
+            }
+            _ => {}
         }
-        out.push(c);
     }
     out
 }
@@ -193,6 +247,7 @@ mod tests {
     fn colors_are_removed_and_text_kept() {
         assert_eq!(strip_ansi("\u{1b}[1;32mABCD-1234\u{1b}[0m pronto"), "ABCD-1234 pronto");
         assert_eq!(strip_ansi("sem cor"), "sem cor");
+        assert_eq!(strip_ansi("\u{1b}7\u{1b}8Welcome\u{1b}[?25l\u{1b}]0;título\u{7} ok\u{1b}[>0q"), "Welcome ok");
     }
 
     #[test]

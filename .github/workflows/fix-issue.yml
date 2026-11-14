@@ -393,13 +393,19 @@ jobs:
           unset FG_TRACKER_TOKEN
           # Relata ao painel do FG Tracker. Lê os eventos (JSON) da entrada. O token vai num
           # descritor de arquivo, fora dos argumentos do curl. Nunca falha nem segura o job.
+          # Sem resposta, 429 ou 5xx, tenta de novo duas vezes: o FG Tracker aplica um relato
+          # repetido sem mudar nada, e um relato perdido deixa a execução sem o passo ou o resultado.
           report() {
-            local body code
+            local body code wait
             body="$(jq -c --arg repo "$REPO" --arg run "$GITHUB_RUN_ID" --arg attempt "${GITHUB_RUN_ATTEMPT:-1}" --arg issue "$ISSUE" \
               '{repository: $repo, runId: $run, runAttempt: ($attempt | tonumber), issueNumber: ($issue | tonumber), events: map(select(. != null))}')" || return 0
             [ "$(jq '.events | length' <<< "$body")" -gt 0 ] || return 0
-            code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 3 --max-time 8 -X POST "${TRACKER_URL%/}/v1/factory/events" \
-              -H 'content-type: application/json' -H @/dev/fd/3 --data-binary @- <<< "$body" 3<<< "Authorization: Bearer $FG_TRACKER_FACTORY_TOKEN" 2>/dev/null)"
+            for wait in 2 6 0; do
+              code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 3 --max-time 8 -X POST "${TRACKER_URL%/}/v1/factory/events" \
+                -H 'content-type: application/json' -H @/dev/fd/3 --data-binary @- <<< "$body" 3<<< "Authorization: Bearer $FG_TRACKER_FACTORY_TOKEN" 2>/dev/null)"
+              case "$code" in 000|429|5??) sleep "$wait" ;; *) break ;; esac
+            done
+            [ "$code" != 000 ] || code=""
             case "$code" in
               200) ;;
               401|403)
@@ -470,13 +476,19 @@ jobs:
           unset FG_TRACKER_TOKEN
           # Relata ao painel do FG Tracker. Lê os eventos (JSON) da entrada. O token vai num
           # descritor de arquivo, fora dos argumentos do curl. Nunca falha nem segura o job.
+          # Sem resposta, 429 ou 5xx, tenta de novo duas vezes: o FG Tracker aplica um relato
+          # repetido sem mudar nada, e um relato perdido deixa a execução sem o passo ou o resultado.
           report() {
-            local body code
+            local body code wait
             body="$(jq -c --arg repo "$REPO" --arg run "$GITHUB_RUN_ID" --arg attempt "${GITHUB_RUN_ATTEMPT:-1}" --arg issue "$ISSUE" \
               '{repository: $repo, runId: $run, runAttempt: ($attempt | tonumber), issueNumber: ($issue | tonumber), events: map(select(. != null))}')" || return 0
             [ "$(jq '.events | length' <<< "$body")" -gt 0 ] || return 0
-            code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 3 --max-time 8 -X POST "${TRACKER_URL%/}/v1/factory/events" \
-              -H 'content-type: application/json' -H @/dev/fd/3 --data-binary @- <<< "$body" 3<<< "Authorization: Bearer $FG_TRACKER_FACTORY_TOKEN" 2>/dev/null)"
+            for wait in 2 6 0; do
+              code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 3 --max-time 8 -X POST "${TRACKER_URL%/}/v1/factory/events" \
+                -H 'content-type: application/json' -H @/dev/fd/3 --data-binary @- <<< "$body" 3<<< "Authorization: Bearer $FG_TRACKER_FACTORY_TOKEN" 2>/dev/null)"
+              case "$code" in 000|429|5??) sleep "$wait" ;; *) break ;; esac
+            done
+            [ "$code" != 000 ] || code=""
             case "$code" in
               200) ;;
               401|403)
@@ -499,9 +511,10 @@ jobs:
           if [ "$agent_runs" = "true" ]; then
             jq -nc --arg now "$now" --arg agent "$EXEC_AGENT" '[{type: "session", role: "executor", at: ($now | tonumber | todate), agent: $agent}]' | report
           fi
-          # Acompanha o log da sessão em segundo plano e envia em lotes de até 100 linhas. O token
-          # entra pelo descritor 3 e fica só na memória deste processo: não está no ambiente dele,
-          # em arquivo nem em argumentos. O passo depois da sessão o encerra e envia o resto.
+          # Acompanha o log da sessão em segundo plano e envia em lotes de até 100 linhas, até o fim,
+          # por mais longa que seja a sessão (o FG Tracker guarda as últimas 5.000 de cada execução).
+          # O token entra pelo descritor 3 e fica só na memória deste processo: não está no ambiente
+          # dele, em arquivo nem em argumentos. O passo depois da sessão o encerra e envia o resto.
           if [ "$REPORT_LOGS" = "true" ] && [ "$agent_runs" = "true" ] && [ -n "${WORK:-}" ]; then
             mkdir -p "$WORK/out" && : > "$WORK/out/session.log"
             state="$RUNNER_TEMP/factory-log-$GITHUB_RUN_ID"
@@ -511,7 +524,7 @@ jobs:
               IFS= read -r token <&3; exec 3<&-
               file="$1"; url="$2"; repo="$3"; run="$4"; attempt="$5"; issue="$6"; state="$7"
               seq=1; ticks=0
-              while [ -e "$state.pid" ] && [ "$seq" -le 50000 ] && [ "$ticks" -lt 7200 ]; do
+              while [ -e "$state.pid" ] && [ "$ticks" -lt 7200 ]; do
                 sleep 3; ticks=$((ticks + 1))
                 for _ in 1 2 3 4 5; do
                   total="$(wc -l < "$file" 2>/dev/null || echo 0)"
@@ -774,13 +787,19 @@ jobs:
           unset FG_TRACKER_TOKEN
           # Relata ao painel do FG Tracker. Lê os eventos (JSON) da entrada. O token vai num
           # descritor de arquivo, fora dos argumentos do curl. Nunca falha nem segura o job.
+          # Sem resposta, 429 ou 5xx, tenta de novo duas vezes: o FG Tracker aplica um relato
+          # repetido sem mudar nada, e um relato perdido deixa a execução sem o passo ou o resultado.
           report() {
-            local body code
+            local body code wait
             body="$(jq -c --arg repo "$REPO" --arg run "$GITHUB_RUN_ID" --arg attempt "${GITHUB_RUN_ATTEMPT:-1}" --arg issue "$ISSUE" \
               '{repository: $repo, runId: $run, runAttempt: ($attempt | tonumber), issueNumber: ($issue | tonumber), events: map(select(. != null))}')" || return 0
             [ "$(jq '.events | length' <<< "$body")" -gt 0 ] || return 0
-            code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 3 --max-time 8 -X POST "${TRACKER_URL%/}/v1/factory/events" \
-              -H 'content-type: application/json' -H @/dev/fd/3 --data-binary @- <<< "$body" 3<<< "Authorization: Bearer $FG_TRACKER_FACTORY_TOKEN" 2>/dev/null)"
+            for wait in 2 6 0; do
+              code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 3 --max-time 8 -X POST "${TRACKER_URL%/}/v1/factory/events" \
+                -H 'content-type: application/json' -H @/dev/fd/3 --data-binary @- <<< "$body" 3<<< "Authorization: Bearer $FG_TRACKER_FACTORY_TOKEN" 2>/dev/null)"
+              case "$code" in 000|429|5??) sleep "$wait" ;; *) break ;; esac
+            done
+            [ "$code" != 000 ] || code=""
             case "$code" in
               200) ;;
               401|403)
@@ -801,21 +820,30 @@ jobs:
           }
           now="$(date +%s)"
           report_session executor "$WORK/session.json"
-          # Encerra o acompanhamento do log e envia o que faltou (no máximo 2.000 linhas aqui).
+          # Encerra o acompanhamento do log e envia o que faltou, no máximo as últimas 2.000 linhas:
+          # o fim do log é o que explica como a sessão terminou, e ele vai mesmo quando o
+          # acompanhamento ficou para trás. Sem resposta, 429 ou 5xx, tenta de novo duas vezes.
           state="$RUNNER_TEMP/factory-log-$GITHUB_RUN_ID"
           if [ -e "$state.pid" ]; then
             kill "$(cat "$state.pid")" 2>/dev/null; rm -f "$state.pid"
             next="$(cat "$state.seq" 2>/dev/null)"; case "$next" in ''|*[!0-9]*) next=1 ;; esac
             file="$WORK/out/session.log"
-            for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
-              total="$(awk 'END { print NR }' "$file" 2>/dev/null || echo 0)"
-              [ "$total" -ge "$next" ] && [ "$next" -le 50000 ] || break
+            total="$(awk 'END { print NR }' "$file" 2>/dev/null || echo 0)"
+            [ "$next" -gt $((total - 2000)) ] || next=$((total - 1999))
+            retries=2
+            while [ "$next" -le "$total" ]; do
               code="$(sed -n "${next},$((next + 99))p" "$file" | jq -Rnc --arg repo "$REPO" --arg run "$GITHUB_RUN_ID" --arg attempt "${GITHUB_RUN_ATTEMPT:-1}" --arg issue "$ISSUE" --arg first "$next" \
                 '{repository: $repo, runId: $run, runAttempt: ($attempt | tonumber), issueNumber: ($issue | tonumber), firstSeq: ($first | tonumber), lines: [inputs | .[0:2000]]}' \
                 | curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 3 --max-time 8 -X POST "${TRACKER_URL%/}/v1/factory/logs" \
                     -H 'content-type: application/json' -H @/dev/fd/3 --data-binary @- 3<<< "Authorization: Bearer $FG_TRACKER_FACTORY_TOKEN" 2>/dev/null)"
-              case "$code" in 200|400|409|413) next=$((next + 100)) ;; *) echo "::notice title=Painel do FG Tracker::O fim do log não foi enviado (HTTP ${code:-sem resposta})."; break ;; esac
+              case "$code" in
+                200|400|409|413) next=$((next + 100)) ;;
+                000|429|5??) [ "$retries" -gt 0 ] || break; retries=$((retries - 1)); sleep 3 ;;
+                *) break ;;
+              esac
             done
+            [ "$code" != 000 ] || code=""
+            [ "$next" -gt "$total" ] || echo "::notice title=Painel do FG Tracker::O fim do log não foi enviado (HTTP ${code:-sem resposta})."
             rm -f "$state.seq"
           fi
           jq -n --arg now "$now" --arg s_agent "$(status "$S_AGENT")" --arg decision "${DECISION:-}" --arg has_validate "$HAS_VALIDATE" '
@@ -895,13 +923,19 @@ jobs:
           unset FG_TRACKER_TOKEN
           # Relata ao painel do FG Tracker. Lê os eventos (JSON) da entrada. O token vai num
           # descritor de arquivo, fora dos argumentos do curl. Nunca falha nem segura o job.
+          # Sem resposta, 429 ou 5xx, tenta de novo duas vezes: o FG Tracker aplica um relato
+          # repetido sem mudar nada, e um relato perdido deixa a execução sem o passo ou o resultado.
           report() {
-            local body code
+            local body code wait
             body="$(jq -c --arg repo "$REPO" --arg run "$GITHUB_RUN_ID" --arg attempt "${GITHUB_RUN_ATTEMPT:-1}" --arg issue "$ISSUE" \
               '{repository: $repo, runId: $run, runAttempt: ($attempt | tonumber), issueNumber: ($issue | tonumber), events: map(select(. != null))}')" || return 0
             [ "$(jq '.events | length' <<< "$body")" -gt 0 ] || return 0
-            code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 3 --max-time 8 -X POST "${TRACKER_URL%/}/v1/factory/events" \
-              -H 'content-type: application/json' -H @/dev/fd/3 --data-binary @- <<< "$body" 3<<< "Authorization: Bearer $FG_TRACKER_FACTORY_TOKEN" 2>/dev/null)"
+            for wait in 2 6 0; do
+              code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 3 --max-time 8 -X POST "${TRACKER_URL%/}/v1/factory/events" \
+                -H 'content-type: application/json' -H @/dev/fd/3 --data-binary @- <<< "$body" 3<<< "Authorization: Bearer $FG_TRACKER_FACTORY_TOKEN" 2>/dev/null)"
+              case "$code" in 000|429|5??) sleep "$wait" ;; *) break ;; esac
+            done
+            [ "$code" != 000 ] || code=""
             case "$code" in
               200) ;;
               401|403)
@@ -965,13 +999,19 @@ jobs:
           unset FG_TRACKER_TOKEN
           # Relata ao painel do FG Tracker. Lê os eventos (JSON) da entrada. O token vai num
           # descritor de arquivo, fora dos argumentos do curl. Nunca falha nem segura o job.
+          # Sem resposta, 429 ou 5xx, tenta de novo duas vezes: o FG Tracker aplica um relato
+          # repetido sem mudar nada, e um relato perdido deixa a execução sem o passo ou o resultado.
           report() {
-            local body code
+            local body code wait
             body="$(jq -c --arg repo "$REPO" --arg run "$GITHUB_RUN_ID" --arg attempt "${GITHUB_RUN_ATTEMPT:-1}" --arg issue "$ISSUE" \
               '{repository: $repo, runId: $run, runAttempt: ($attempt | tonumber), issueNumber: ($issue | tonumber), events: map(select(. != null))}')" || return 0
             [ "$(jq '.events | length' <<< "$body")" -gt 0 ] || return 0
-            code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 3 --max-time 8 -X POST "${TRACKER_URL%/}/v1/factory/events" \
-              -H 'content-type: application/json' -H @/dev/fd/3 --data-binary @- <<< "$body" 3<<< "Authorization: Bearer $FG_TRACKER_FACTORY_TOKEN" 2>/dev/null)"
+            for wait in 2 6 0; do
+              code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 3 --max-time 8 -X POST "${TRACKER_URL%/}/v1/factory/events" \
+                -H 'content-type: application/json' -H @/dev/fd/3 --data-binary @- <<< "$body" 3<<< "Authorization: Bearer $FG_TRACKER_FACTORY_TOKEN" 2>/dev/null)"
+              case "$code" in 000|429|5??) sleep "$wait" ;; *) break ;; esac
+            done
+            [ "$code" != 000 ] || code=""
             case "$code" in
               200) ;;
               401|403)
@@ -1212,13 +1252,19 @@ jobs:
           unset FG_TRACKER_TOKEN
           # Relata ao painel do FG Tracker. Lê os eventos (JSON) da entrada. O token vai num
           # descritor de arquivo, fora dos argumentos do curl. Nunca falha nem segura o job.
+          # Sem resposta, 429 ou 5xx, tenta de novo duas vezes: o FG Tracker aplica um relato
+          # repetido sem mudar nada, e um relato perdido deixa a execução sem o passo ou o resultado.
           report() {
-            local body code
+            local body code wait
             body="$(jq -c --arg repo "$REPO" --arg run "$GITHUB_RUN_ID" --arg attempt "${GITHUB_RUN_ATTEMPT:-1}" --arg issue "$ISSUE" \
               '{repository: $repo, runId: $run, runAttempt: ($attempt | tonumber), issueNumber: ($issue | tonumber), events: map(select(. != null))}')" || return 0
             [ "$(jq '.events | length' <<< "$body")" -gt 0 ] || return 0
-            code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 3 --max-time 8 -X POST "${TRACKER_URL%/}/v1/factory/events" \
-              -H 'content-type: application/json' -H @/dev/fd/3 --data-binary @- <<< "$body" 3<<< "Authorization: Bearer $FG_TRACKER_FACTORY_TOKEN" 2>/dev/null)"
+            for wait in 2 6 0; do
+              code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 3 --max-time 8 -X POST "${TRACKER_URL%/}/v1/factory/events" \
+                -H 'content-type: application/json' -H @/dev/fd/3 --data-binary @- <<< "$body" 3<<< "Authorization: Bearer $FG_TRACKER_FACTORY_TOKEN" 2>/dev/null)"
+              case "$code" in 000|429|5??) sleep "$wait" ;; *) break ;; esac
+            done
+            [ "$code" != 000 ] || code=""
             case "$code" in
               200) ;;
               401|403)
@@ -1486,13 +1532,19 @@ jobs:
           unset FG_TRACKER_TOKEN
           # Relata ao painel do FG Tracker. Lê os eventos (JSON) da entrada. O token vai num
           # descritor de arquivo, fora dos argumentos do curl. Nunca falha nem segura o job.
+          # Sem resposta, 429 ou 5xx, tenta de novo duas vezes: o FG Tracker aplica um relato
+          # repetido sem mudar nada, e um relato perdido deixa a execução sem o passo ou o resultado.
           report() {
-            local body code
+            local body code wait
             body="$(jq -c --arg repo "$REPO" --arg run "$GITHUB_RUN_ID" --arg attempt "${GITHUB_RUN_ATTEMPT:-1}" --arg issue "$ISSUE" \
               '{repository: $repo, runId: $run, runAttempt: ($attempt | tonumber), issueNumber: ($issue | tonumber), events: map(select(. != null))}')" || return 0
             [ "$(jq '.events | length' <<< "$body")" -gt 0 ] || return 0
-            code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 3 --max-time 8 -X POST "${TRACKER_URL%/}/v1/factory/events" \
-              -H 'content-type: application/json' -H @/dev/fd/3 --data-binary @- <<< "$body" 3<<< "Authorization: Bearer $FG_TRACKER_FACTORY_TOKEN" 2>/dev/null)"
+            for wait in 2 6 0; do
+              code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 3 --max-time 8 -X POST "${TRACKER_URL%/}/v1/factory/events" \
+                -H 'content-type: application/json' -H @/dev/fd/3 --data-binary @- <<< "$body" 3<<< "Authorization: Bearer $FG_TRACKER_FACTORY_TOKEN" 2>/dev/null)"
+              case "$code" in 000|429|5??) sleep "$wait" ;; *) break ;; esac
+            done
+            [ "$code" != 000 ] || code=""
             case "$code" in
               200) ;;
               401|403)
@@ -1594,13 +1646,19 @@ jobs:
           unset FG_TRACKER_TOKEN
           # Relata ao painel do FG Tracker. Lê os eventos (JSON) da entrada. O token vai num
           # descritor de arquivo, fora dos argumentos do curl. Nunca falha nem segura o job.
+          # Sem resposta, 429 ou 5xx, tenta de novo duas vezes: o FG Tracker aplica um relato
+          # repetido sem mudar nada, e um relato perdido deixa a execução sem o passo ou o resultado.
           report() {
-            local body code
+            local body code wait
             body="$(jq -c --arg repo "$REPO" --arg run "$GITHUB_RUN_ID" --arg attempt "${GITHUB_RUN_ATTEMPT:-1}" --arg issue "$ISSUE" \
               '{repository: $repo, runId: $run, runAttempt: ($attempt | tonumber), issueNumber: ($issue | tonumber), events: map(select(. != null))}')" || return 0
             [ "$(jq '.events | length' <<< "$body")" -gt 0 ] || return 0
-            code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 3 --max-time 8 -X POST "${TRACKER_URL%/}/v1/factory/events" \
-              -H 'content-type: application/json' -H @/dev/fd/3 --data-binary @- <<< "$body" 3<<< "Authorization: Bearer $FG_TRACKER_FACTORY_TOKEN" 2>/dev/null)"
+            for wait in 2 6 0; do
+              code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 3 --max-time 8 -X POST "${TRACKER_URL%/}/v1/factory/events" \
+                -H 'content-type: application/json' -H @/dev/fd/3 --data-binary @- <<< "$body" 3<<< "Authorization: Bearer $FG_TRACKER_FACTORY_TOKEN" 2>/dev/null)"
+              case "$code" in 000|429|5??) sleep "$wait" ;; *) break ;; esac
+            done
+            [ "$code" != 000 ] || code=""
             case "$code" in
               200) ;;
               401|403)

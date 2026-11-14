@@ -398,8 +398,10 @@ relata, e o token de leitura pode voltar a ser só de leitura.
 
 ### Execuções
 
-Cada execução relata o começo, o início e o fim de cada passo e o resultado. Para ver também a
-saída da sessão do Claude Code enquanto ela roda, ligue no `with:` do `factory.yml`:
+Cada execução relata o começo, o início e o fim de cada passo e o resultado. Um relato que fica
+sem resposta ou volta com 429 ou 5xx é tentado de novo duas vezes; repetir um relato não muda nada
+no painel. Para ver também a saída da sessão do Claude Code enquanto ela roda, ligue no `with:` do
+`factory.yml`:
 
 ```yaml
       report_logs: true

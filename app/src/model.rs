@@ -354,10 +354,10 @@ mod tests {
     fn the_input_carries_one_answer_per_line_and_only_typed_secrets() {
         let check = parse_check(CHECK).unwrap();
         let mut a = Answers::from_check(&check);
-        a.machine = "PC do\nTiago".into();
+        a.machine = "PC da\nsala".into();
         a.claude = "sk-ant-oat 01\n".into();
         let input = a.to_input();
-        assert!(input.contains("MACHINE=PC do Tiago\n"));
+        assert!(input.contains("MACHINE=PC da sala\n"));
         assert!(input.contains("AGENT=codex\nREVIEW_AGENT=claude\n"));
         assert!(input.contains("CODEX_LOGIN=chatgpt\n"));
         assert!(input.contains("CLAUDE_TOKEN=sk-ant-oat01\n"));
@@ -614,12 +614,12 @@ mod status_tests {
     fn the_status_says_what_each_runner_does() {
         let page = parse_status(r#"{"org":"FORTGROUND","runners":[
           {"service":"runner1","name":"factory-pc-1","running":true,"online":true,"state":"working","busy":true,
-           "repository":"FORTGROUND/gallery-backend","issue":42,"title":"Erro 500","step":"review","runId":"987","agent":"codex","reviewAgent":"claude","logLines":4},
+           "repository":"FORTGROUND/loja-api","issue":42,"title":"Erro 500","step":"review","runId":"987","agent":"codex","reviewAgent":"claude","logLines":4},
           {"service":"runner2","name":"factory-pc-2","running":false,"online":false,"state":"paused"}]}"#).unwrap();
         let (working, paused) = (&page.runners[0], &page.runners[1]);
         assert_eq!(working.state_label(), "Trabalhando");
         assert_eq!(working.step_label().as_deref(), Some("Revisando (Claude Code)"));
-        assert_eq!(working.run_url().as_deref(), Some("https://github.com/FORTGROUND/gallery-backend/actions/runs/987"));
+        assert_eq!(working.run_url().as_deref(), Some("https://github.com/FORTGROUND/loja-api/actions/runs/987"));
         assert_eq!((paused.state_label(), paused.step_label(), paused.run_url()), ("Pausado", None, None));
         assert!(parse_status("erro").is_err());
         let attention = parse_status(r#"{"runners":[{"service":"runner1","running":true,"state":"attention","problems":["sem as credenciais guardadas"]}]}"#).unwrap();

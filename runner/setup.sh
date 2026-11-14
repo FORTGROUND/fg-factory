@@ -215,7 +215,9 @@ login_codex() {
 #   3. o painel do FG Tracker aceitou o sinal dele (o token do FG Tracker vale);
 #   4. um job curto, disparado no GitHub só para ele (pelo rótulo com o nome), termina verde.
 # Cada linha `::runner::<serviço>::<step|ok|fail>::<texto>` é o andamento de um runner; o app as mostra.
-CHECK_REPO_DEFAULT=factory
+# O runner check fica num repositório privado da organização: por padrão, um runner próprio não
+# aceita jobs de repositório público (templates/runner-check.yml).
+CHECK_REPO_DEFAULT=ci
 check_runner() {  # check_runner <serviço> <org> <máquina> <repositório do runner check>
   local service="$1" org="$2" machine="$3" check_repo="$4" name id result url run status conclusion
   name="factory-$machine-${service#runner}"
@@ -376,8 +378,8 @@ repo_line() {  # repo_line <dono/nome> -> uma linha JSON
 }
 
 # A configuração da IA de um repositório: quem corrige e quem revisa, modelo, raciocínio, modo
-# rápido, revisor e merge. Fica na variável FACTORY_SETTINGS do repositório, que o workflow
-# central (FORTGROUND/ci, factory-settings.yml) lê por cima da configuração dele.
+# rápido, revisor e merge. Fica na variável FACTORY_SETTINGS do repositório, que vence a
+# configuração central da organização, quando o factory.yml do repositório usa uma.
 set_repo_settings() {
   local repo="$1" org settings; org="$(default_org)"
   case "$repo" in */*) ;; '') fail "informe o repositório." ;; *) repo="$org/$repo" ;; esac

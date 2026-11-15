@@ -239,8 +239,10 @@ Settings → Resources: o app sugere quantos runners cabem pelo que o Docker tem
    runner que passa): online no GitHub, credenciais guardadas, o agente escolhido respondendo
    (uma pergunta mínima, só no primeiro runner), o Docker próprio, o sinal aceito pelo painel do
    FG Tracker e um job curto disparado no GitHub só para aquele runner. O job é o
-   `runner-check.yml` do repositório `<organização>/factory` (ou o de `FACTORY_CHECK_REPO`); sem
-   ele, o teste para antes do job. Cada runner ganha um rótulo com o próprio nome para isso.
+   `runner-check.yml` do repositório `<organização>/ci` (ou o de `FACTORY_CHECK_REPO`), copiado
+   de [`templates/runner-check.yml`](templates/runner-check.yml). Esse repositório precisa ser
+   privado: por padrão, um runner próprio não aceita jobs de repositório público. Sem ele, o
+   teste para antes do job. Cada runner ganha um rótulo com o próprio nome para isso.
 
 Para mudar algo depois (mais runners, outro agente, um token novo), abra o app de novo: o que
 fica em branco mantém o que já está gravado.
@@ -287,8 +289,8 @@ fica nela, gravado no próprio repositório do GitHub (vale em qualquer máquina
   máquina; "Voltar ao padrão" apaga a variável.
 
 Quem vence, numa execução: o disparo manual, depois `FACTORY_SETTINGS` do repositório, depois o
-bloco `REPOS` da configuração central (`FORTGROUND/ci`, `factory-settings.yml`), depois `DEFAULTS`
-dela, depois o que a máquina declara no `.env`. No terminal: `bash setup.sh --repos`,
+bloco `REPOS` da configuração central da organização (quando o `factory.yml` do repositório usa
+uma), depois `DEFAULTS` dela, depois o que a máquina declara no `.env`. No terminal: `bash setup.sh --repos`,
 `bash setup.sh --auto <repositório> on|off` e
 `echo '{"agent":"codex"}' | bash setup.sh --repo-settings <repositório>`.
 

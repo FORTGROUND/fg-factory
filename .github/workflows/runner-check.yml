@@ -1,0 +1,40 @@
+# Confere um runner da factory: roda um job curto num runner `factory` e mostra a máquina, as
+# ferramentas, as credenciais guardadas e se ela cumpre a política de credenciais.
+# Reutilizável. Por padrão, um runner próprio não aceita jobs de repositório público: quem
+# dispara é um repositório privado da organização, com o templates/runner-check.yml. O app FG
+# Factory Setup o dispara para cada runner novo, pelo nome (cada runner tem um rótulo igual ao
+# próprio nome).
+name: Runner check
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: Nome do runner (vazio = qualquer runner factory)
+        type: string
+        default: ''
+
+permissions: {}
+
+jobs:
+  check:
+    runs-on: ${{ inputs.runner != '' && fromJSON(format('["factory","{0}"]', inputs.runner)) || fromJSON('["factory"]') }}
+    timeout-minutes: 5
+    steps:
+      - name: Máquina e ferramentas
+        shell: bash
+        run: |
+          echo "Runner: $RUNNER_NAME ($RUNNER_OS $RUNNER_ARCH), usuário $(id -un)"
+          for tool in git gh jq node npx claude codex; do
+            command -v "$tool" >/dev/null && echo "ok     $tool $("$tool" --version 2>&1 | head -1)" || echo "FALTA  $tool"
+          done
+          bad=0
+          for path in "$HOME/.aws" "$HOME/.ssh/id_rsa" "$HOME/.ssh/id_ed25519" "$HOME/.kube/config" "$HOME/.config/gcloud"; do
+            if [ -e "$path" ]; then echo "::error::$path existe nesta máquina"; bad=1; fi
+          done
+          if [ -s "$HOME/.fg-factory/credentials" ]; then
+            echo "ok     credenciais guardadas no runner: $(sed 's/=.*//' "$HOME/.fg-factory/credentials" | tr '\n' ' ')"
+          else
+            echo "aviso  sem credenciais guardadas no runner (os repositórios precisam dos segredos)"
+          fi
+          exit "$bad"

@@ -1,0 +1,23 @@
+# Teste dos runners da factory. Copie para .github/workflows/runner-check.yml de um repositório
+# PRIVADO da organização: por padrão, um runner próprio não aceita jobs de repositório público.
+# O app FG Factory Setup procura este workflow em <organização>/ci; para usar outro repositório,
+# rode o setup com FACTORY_CHECK_REPO=<organização>/<repositório>.
+# Também roda à mão: Actions → Runner check → Run workflow.
+name: Runner check
+run-name: Runner check ${{ inputs.runner }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: Nome do runner (vazio = qualquer runner factory)
+        type: string
+        default: ''
+
+permissions: {}
+
+jobs:
+  check:
+    uses: FORTGROUND/fg-factory/.github/workflows/runner-check.yml@v1
+    with:
+      runner: ${{ inputs.runner }}

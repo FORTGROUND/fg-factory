@@ -469,7 +469,7 @@ impl App {
         let saving = self.repos.saving;
         card(ui, &format!("IA de {repository}"), |ui| {
             let f = &mut self.repos.form;
-            ui.label(RichText::new("Vazio ou \"padrão\" = segue a configuração central (FORTGROUND/ci) e, por fim, a da máquina que pegar a tarefa.").color(MUTED));
+            ui.label(RichText::new("Vazio ou \"padrão\" = segue a configuração central da organização, se houver, e por fim a da máquina que pegar a tarefa.").color(MUTED));
             ui.add_space(6.0);
             ui.label(RichText::new("Quem corrige").strong());
             ui.horizontal(|ui| {

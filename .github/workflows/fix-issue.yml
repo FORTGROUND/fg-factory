@@ -649,8 +649,10 @@ jobs:
             if [ -n "$FG_TRACKER_TOKEN" ]; then echo "::add-mask::$FG_TRACKER_TOKEN"; fi
           fi
           jq '{number, title, body, labels: [.labels[].name], created_at, html_url}' "$WORK/issue.json" > "$WORK/issue.public.json"
+          # MCP do FG Tracker: o pacote npm executa o servidor Rust (0.50.0 em diante). Sem versão fixa:
+          # as versões TypeScript (até a 0.49.1) estão descontinuadas e não recebem correções.
           (umask 077; jq -n --arg url "$FG_TRACKER_URL" --arg token "$FG_TRACKER_TOKEN" \
-            '{mcpServers: {"fg-tracker": {command: "npx", args: ["-y", "fg-tracker-mcp@0.49.1"], env: {FG_TRACKER_URL: $url, FG_TRACKER_TOKEN: $token}}}}' > "$WORK/mcp.json")
+            '{mcpServers: {"fg-tracker": {command: "npx", args: ["-y", "fg-tracker-mcp@latest"], env: {FG_TRACKER_URL: $url, FG_TRACKER_TOKEN: $token}}}}' > "$WORK/mcp.json")
 
           # O mesmo servidor MCP para o Codex: um lançador que lê o token de um arquivo, para ele
           # não aparecer nos argumentos do processo.
@@ -661,7 +663,7 @@ jobs:
           set -euo pipefail
           work="$(cd "$(dirname "$0")/.." && pwd)"
           set -a; . "$work/mcp.env"; set +a
-          exec npx -y fg-tracker-mcp@0.49.1
+          exec npx -y fg-tracker-mcp@latest
           SCRIPT
           chmod +x "$WORK/bin/fg-tracker-mcp"
 
